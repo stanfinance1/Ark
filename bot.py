@@ -110,8 +110,8 @@ def main():
     logger.info("Starting Ark...")
 
     app = App(
-        token=os.environ["SLACK_BOT_TOKEN"],
-        signing_secret=os.environ["SLACK_SIGNING_SECRET"],
+        token=os.environ["SLACK_BOT_TOKEN"].strip(),
+        signing_secret=os.environ["SLACK_SIGNING_SECRET"].strip(),
     )
 
     @app.event("app_mention")
@@ -123,7 +123,7 @@ def main():
         if event.get("channel_type") == "im":
             _handle_message(event, say, client)
 
-    handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
+    handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"].strip())
     logger.info("Ark is online. Listening for messages.")
     handler.start()
 
