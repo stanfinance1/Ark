@@ -1,12 +1,13 @@
 """
 Ark - Launcher script.
-Starts both the Slack bot and the reminder scheduler as separate processes.
+Starts both the Slack bot and the reminder scheduler as separate threads.
+Using threads instead of processes for better Railway compatibility.
 """
 
 import sys
 import os
 import logging
-from multiprocessing import Process
+import threading
 
 # Add ark directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,24 +34,11 @@ def run_scheduler():
 if __name__ == "__main__":
     logger.info("Starting Ark with bot and scheduler...")
 
-    # Start bot process
-    bot_process = Process(target=run_bot, name="ark-bot")
-    bot_process.start()
+    # Start scheduler in background thread (daemon so it exits when main thread exits)
+    scheduler_thread = threading.Thread(target=run_scheduler, name="ark-scheduler", daemon=True)
+    scheduler_thread.start()
+    logger.info("Scheduler thread started")
 
-    # Start scheduler process
-    scheduler_process = Process(target=run_scheduler, name="ark-scheduler")
-    scheduler_process.start()
-
-    logger.info("Both processes started. Waiting...")
-
-    # Wait for both processes
-    try:
-        bot_process.join()
-        scheduler_process.join()
-    except KeyboardInterrupt:
-        logger.info("Stopping Ark...")
-        bot_process.terminate()
-        scheduler_process.terminate()
-        bot_process.join()
-        scheduler_process.join()
-        logger.info("Ark stopped.")
+    # Run bot in main thread (this blocks)
+    logger.info("Starting bot in main thread...")
+    run_bot()
