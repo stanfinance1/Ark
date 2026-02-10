@@ -1,6 +1,5 @@
 """
 Ark - Tool definitions and execution.
-Defines tools for Claude API tool use, and executes them when called.
 """
 
 import subprocess
@@ -12,14 +11,18 @@ import concurrent.futures
 
 import requests
 import trafilatura
+from bs4 import BeautifulSoup
 from ddgs import DDGS
 
 from config import BASE_DIR, TMP_DIR
 
 logger = logging.getLogger(__name__)
 PYTHON = sys.executable
+_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-# Tool definitions in Claude API format
+# ---------------------------------------------------------------------------
+# Tool definitions (Claude API format)
+# ---------------------------------------------------------------------------
 TOOL_DEFINITIONS = [
     {
         "name": "run_python",
@@ -159,6 +162,64 @@ TOOL_DEFINITIONS = [
     },
 ]
 
+# ---------------------------------------------------------------------------
+# Shared helpers (no duplication)
+# ---------------------------------------------------------------------------
+
+def _download_page(url: str, timeout: int = 15) -> str:
+    """Download HTML from a URL. Trafilatura first, requests fallback."""
+    html = trafilatura.fetch_url(url)
+    if html:
+        return html
+    resp = requests.get(url, timeout=timeout, headers={"User-Agent": _UA})
+    resp.raise_for_status()
+    return resp.text
+
+
+def _extract_text(html: str, max_chars: int = 10000) -> str:
+    """Extract readable text from HTML. Trafilatura first, BS4 fallback."""
+    text = trafilatura.extract(
+        html, include_links=True, include_tables=True, favor_recall=True,
+    )
+    if not text:
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+    if not text:
+        return ""
+    return text[:max_chars] + "\n\n... (truncated)" if len(text) > max_chars else text
+
+
+def _ddg_search(query: str, max_results: int = 5) -> list:
+    """Run a DuckDuckGo search. Returns list of {title, href, body}."""
+    return list(DDGS().text(query, max_results=max_results))
+
+
+def _format_results(results: list, bold: bool = False) -> str:
+    """Format DDG results into readable text."""
+    lines = []
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "No title")
+        lines.append(f"{i}. {'**' + title + '**' if bold else title}")
+        lines.append(f"   URL: {r.get('href', '')}")
+        lines.append(f"   {r.get('body', '')}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _human_size(size_bytes: int) -> str:
+    """Convert bytes to human-readable size."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if size_bytes < 1024:
+            return f"{size_bytes:.0f}{unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f}TB"
+
+
+# ---------------------------------------------------------------------------
+# Tool dispatcher
+# ---------------------------------------------------------------------------
 
 def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
     """Execute a tool and return the result as a string."""
@@ -170,11 +231,7 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
         elif name == "list_files":
             return _list_files(inputs.get("path", ""))
         elif name == "upload_file":
-            return _upload_file(
-                inputs.get("path", ""),
-                inputs.get("title", ""),
-                slack_context,
-            )
+            return _upload_file(inputs.get("path", ""), inputs.get("title", ""), slack_context)
         elif name == "web_search":
             return _web_search(inputs.get("query", ""), inputs.get("max_results", 5))
         elif name == "fetch_url":
@@ -189,37 +246,27 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
         else:
             return f"Error: Unknown tool '{name}'"
     except Exception as e:
-        return f"Error executing {name}: {str(e)}"
+        return f"Error executing {name}: {e}"
 
+
+# ---------------------------------------------------------------------------
+# Tool implementations
+# ---------------------------------------------------------------------------
 
 def _run_python(code: str, description: str = "") -> str:
     """Execute Python code in a subprocess and return stdout + stderr."""
-    header = f"""
-import sys
-import os
-TMP_DIR = r"{TMP_DIR}"
-BASE_DIR = r"{BASE_DIR}"
-os.makedirs(TMP_DIR, exist_ok=True)
-"""
-    full_code = header + "\n" + code
+    full_code = f"import sys, os\nTMP_DIR = r\"{TMP_DIR}\"\nBASE_DIR = r\"{BASE_DIR}\"\nos.makedirs(TMP_DIR, exist_ok=True)\n\n{code}"
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", dir=TMP_DIR, delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", dir=TMP_DIR, delete=False) as f:
         f.write(full_code)
         script_path = f.name
 
     try:
         result = subprocess.run(
             [PYTHON, script_path],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            cwd=BASE_DIR,
+            capture_output=True, text=True, timeout=120, cwd=BASE_DIR,
         )
-        output = ""
-        if result.stdout:
-            output += result.stdout
+        output = result.stdout or ""
         if result.stderr:
             output += "\n[STDERR]\n" + result.stderr
         if result.returncode != 0:
@@ -265,33 +312,27 @@ def _list_files(path: str = "") -> str:
             if os.path.isdir(full):
                 entries.append(f"  {entry}/")
             else:
-                size = os.path.getsize(full)
-                entries.append(f"  {entry} ({_human_size(size)})")
+                entries.append(f"  {entry} ({_human_size(os.path.getsize(full))})")
         return f"Contents of {path}:\n" + "\n".join(entries)
     except Exception as e:
         return f"Error listing directory: {e}"
 
 
 def _upload_file(path: str, title: str, slack_context: dict) -> str:
-    """Upload a file to Slack. Requires slack_context with client + channel."""
+    """Upload a file to Slack."""
     if not slack_context:
         return "Error: No Slack context available for file upload."
     if not os.path.exists(path):
         return f"Error: File not found: {path}"
-
     client = slack_context.get("client")
     channel = slack_context.get("channel")
-    thread_ts = slack_context.get("thread_ts")
-
     if not client or not channel:
         return "Error: Missing Slack client or channel."
-
     try:
         client.files_upload_v2(
-            channel=channel,
-            file=path,
+            channel=channel, file=path,
             title=title or os.path.basename(path),
-            thread_ts=thread_ts,
+            thread_ts=slack_context.get("thread_ts"),
         )
         return f"Uploaded {os.path.basename(path)} to Slack."
     except Exception as e:
@@ -299,137 +340,63 @@ def _upload_file(path: str, title: str, slack_context: dict) -> str:
 
 
 def _web_search(query: str, max_results: int = 5) -> str:
-    """Search the web using DuckDuckGo and return results."""
+    """Quick web search - returns titles, URLs, and snippets."""
     if not query:
         return "Error: No search query provided."
     try:
-        results = list(DDGS().text(query, max_results=max_results))
-        if not results:
-            return f"No results found for: {query}"
-        output = []
-        for i, r in enumerate(results, 1):
-            output.append(f"{i}. {r.get('title', 'No title')}")
-            output.append(f"   URL: {r.get('href', '')}")
-            output.append(f"   {r.get('body', '')}")
-            output.append("")
-        return "\n".join(output).strip()
+        results = _ddg_search(query, max_results)
+        return _format_results(results) if results else f"No results found for: {query}"
     except Exception as e:
         return f"Error searching web: {e}"
 
 
 def _fetch_url(url: str, max_chars: int = 10000) -> str:
-    """Fetch a URL and extract readable text using trafilatura."""
+    """Fetch a single URL and extract clean text."""
     if not url:
         return "Error: No URL provided."
     try:
-        # Download the page
-        downloaded = trafilatura.fetch_url(url)
-        if not downloaded:
-            # Fallback to requests if trafilatura fetch fails
-            resp = requests.get(url, timeout=15, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            })
-            resp.raise_for_status()
-            downloaded = resp.text
-
-        # Extract main content with trafilatura
-        text = trafilatura.extract(
-            downloaded,
-            include_links=True,
-            include_tables=True,
-            favor_recall=True,
-        )
-
-        if not text:
-            # Last resort: basic extraction
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(downloaded, "html.parser")
-            for tag in soup(["script", "style"]):
-                tag.decompose()
-            text = soup.get_text(separator="\n", strip=True)
-
-        if not text:
-            return "(page had no extractable text content)"
-
-        if len(text) > max_chars:
-            text = text[:max_chars] + "\n\n... (truncated)"
-        return text
+        html = _download_page(url)
+        return _extract_text(html, max_chars) or "(page had no extractable text content)"
     except Exception as e:
         return f"Error fetching URL: {e}"
 
 
 def _web_research(query: str, num_results: int = 5, fetch_top: int = 3, max_chars_per_page: int = 8000) -> str:
-    """All-in-one research: search + auto-fetch top results in parallel."""
+    """All-in-one: search + auto-fetch top results in parallel."""
     if not query:
         return "Error: No query provided."
-
-    # Step 1: Search
     try:
-        results = list(DDGS().text(query, max_results=num_results))
+        results = _ddg_search(query, num_results)
     except Exception as e:
         return f"Error searching: {e}"
-
     if not results:
         return f"No results found for: {query}"
 
-    # Step 2: Build search results summary
-    output = [f"## Search Results for: {query}\n"]
-    for i, r in enumerate(results, 1):
-        output.append(f"{i}. **{r.get('title', 'No title')}**")
-        output.append(f"   URL: {r.get('href', '')}")
-        output.append(f"   {r.get('body', '')}")
-        output.append("")
+    output = [f"## Search Results for: {query}\n", _format_results(results, bold=True)]
 
-    # Step 3: Fetch top N results in parallel for full content
-    urls_to_fetch = []
-    for r in results[:fetch_top]:
-        url = r.get("href", "")
-        if url and not any(skip in url for skip in ["youtube.com", "reddit.com/r/", ".pdf"]):
-            urls_to_fetch.append((r.get("title", ""), url))
+    # Pick fetchable URLs (skip video/forum/PDF)
+    skip = ("youtube.com", "reddit.com/r/", ".pdf")
+    urls = [
+        (r.get("title", ""), r["href"])
+        for r in results[:fetch_top]
+        if r.get("href") and not any(s in r["href"] for s in skip)
+    ]
 
-    if urls_to_fetch:
+    if urls:
         output.append("\n---\n## Full Content from Top Results\n")
 
-        def fetch_one(title_url):
+        def _fetch_one(title_url):
             title, url = title_url
             try:
-                downloaded = trafilatura.fetch_url(url)
-                if not downloaded:
-                    resp = requests.get(url, timeout=10, headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                    })
-                    resp.raise_for_status()
-                    downloaded = resp.text
-                text = trafilatura.extract(
-                    downloaded,
-                    include_links=True,
-                    include_tables=True,
-                    favor_recall=True,
-                )
-                if text and len(text) > max_chars_per_page:
-                    text = text[:max_chars_per_page] + "\n... (truncated)"
-                return (title, url, text)
+                html = _download_page(url, timeout=10)
+                text = _extract_text(html, max_chars_per_page)
+                return title, url, text
             except Exception as e:
-                return (title, url, f"(failed to fetch: {e})")
+                return title, url, f"(failed to fetch: {e})"
 
-        # Fetch pages in parallel (3 at a time)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            fetched = list(executor.map(fetch_one, urls_to_fetch))
-
-        for title, url, text in fetched:
-            if text:
-                output.append(f"### {title}")
-                output.append(f"Source: {url}\n")
-                output.append(text)
-                output.append("\n---\n")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            for title, url, text in pool.map(_fetch_one, urls):
+                if text:
+                    output.extend([f"### {title}", f"Source: {url}\n", text, "\n---\n"])
 
     return "\n".join(output).strip()
-
-
-def _human_size(size_bytes: int) -> str:
-    """Convert bytes to human-readable size."""
-    for unit in ["B", "KB", "MB", "GB"]:
-        if size_bytes < 1024:
-            return f"{size_bytes:.0f}{unit}"
-        size_bytes /= 1024
-    return f"{size_bytes:.1f}TB"
