@@ -8,6 +8,10 @@ import os
 import sys
 import tempfile
 
+import requests
+from bs4 import BeautifulSoup
+from duckduckgo_search import DDGS
+
 from config import BASE_DIR, TMP_DIR
 
 PYTHON = sys.executable
@@ -83,6 +87,44 @@ TOOL_DEFINITIONS = [
             "required": ["path"],
         },
     },
+    {
+        "name": "web_search",
+        "description": "Search the internet using DuckDuckGo. Returns top results with titles, URLs, and snippets. Use this for weather, news, prices, company info, or any real-time information.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query (e.g. 'NYC weather today', 'AAPL stock price', 'latest AI news').",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Number of results to return. Defaults to 5.",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "fetch_url",
+        "description": "Fetch a web page and extract its text content. Use this after web_search to read a specific page, or when a user shares a URL they want you to read.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Full URL to fetch (e.g. 'https://example.com/article').",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Maximum characters of text to return. Defaults to 5000.",
+                    "default": 5000,
+                },
+            },
+            "required": ["url"],
+        },
+    },
 ]
 
 
@@ -101,6 +143,10 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
                 inputs.get("title", ""),
                 slack_context,
             )
+        elif name == "web_search":
+            return _web_search(inputs.get("query", ""), inputs.get("max_results", 5))
+        elif name == "fetch_url":
+            return _fetch_url(inputs.get("url", ""), inputs.get("max_chars", 5000))
         else:
             return f"Error: Unknown tool '{name}'"
     except Exception as e:
@@ -213,6 +259,47 @@ def _upload_file(path: str, title: str, slack_context: dict) -> str:
         return f"Uploaded {os.path.basename(path)} to Slack."
     except Exception as e:
         return f"Error uploading file: {e}"
+
+
+def _web_search(query: str, max_results: int = 5) -> str:
+    """Search the web using DuckDuckGo and return results."""
+    if not query:
+        return "Error: No search query provided."
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+        if not results:
+            return f"No results found for: {query}"
+        output = []
+        for i, r in enumerate(results, 1):
+            output.append(f"{i}. {r.get('title', 'No title')}")
+            output.append(f"   URL: {r.get('href', '')}")
+            output.append(f"   {r.get('body', '')}")
+            output.append("")
+        return "\n".join(output).strip()
+    except Exception as e:
+        return f"Error searching web: {e}"
+
+
+def _fetch_url(url: str, max_chars: int = 5000) -> str:
+    """Fetch a URL and extract readable text content."""
+    if not url:
+        return "Error: No URL provided."
+    try:
+        resp = requests.get(url, timeout=15, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; Ark-Bot/1.0)"
+        })
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        # Remove script and style elements
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n\n... (truncated)"
+        return text or "(page had no readable text)"
+    except Exception as e:
+        return f"Error fetching URL: {e}"
 
 
 def _human_size(size_bytes: int) -> str:
