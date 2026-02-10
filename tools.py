@@ -8,7 +8,7 @@ import os
 import sys
 import tempfile
 
-from config import BASE_DIR, TOOLS_DIR, TMP_DIR
+from config import BASE_DIR, TMP_DIR
 
 PYTHON = sys.executable
 
@@ -114,10 +114,7 @@ def _run_python(code: str, description: str = "") -> str:
 import sys
 import os
 TMP_DIR = r"{TMP_DIR}"
-TOOLS_DIR = r"{TOOLS_DIR}"
 BASE_DIR = r"{BASE_DIR}"
-INPUTS_DIR = r"{os.path.join(os.path.dirname(BASE_DIR), 'inputs')}"
-OUTPUTS_DIR = r"{os.path.join(os.path.dirname(BASE_DIR), 'outputs')}"
 os.makedirs(TMP_DIR, exist_ok=True)
 """
     full_code = header + "\n" + code
@@ -173,7 +170,7 @@ def _read_file(path: str, max_lines: int = 200) -> str:
 def _list_files(path: str = "") -> str:
     """List files in a directory."""
     if not path:
-        path = os.path.dirname(BASE_DIR)  # Project root (Agentic Workflows/)
+        path = BASE_DIR
     if not os.path.isabs(path):
         path = os.path.join(BASE_DIR, path)
     if not os.path.isdir(path):

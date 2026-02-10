@@ -5,6 +5,7 @@ Sends messages to Claude, handles tool calls, and returns final response.
 
 import anthropic
 import os
+import time
 from dotenv import load_dotenv
 
 from config import CLAUDE_MODEL, MAX_TOKENS, SYSTEM_PROMPT
@@ -13,7 +14,7 @@ from memory import ConversationMemory
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
-client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip())
 memory = ConversationMemory()
 
 
@@ -41,11 +42,15 @@ def think(user_text: str, channel: str, thread_ts: str, slack_context: dict = No
     )
 
     # Tool use loop - Claude may call tools multiple times
-    max_iterations = 10  # Safety limit
+    max_iterations = 5  # Safety limit to prevent runaway API calls
     iteration = 0
 
     while response.stop_reason == "tool_use" and iteration < max_iterations:
         iteration += 1
+
+        # Small delay between iterations to avoid rate limits
+        if iteration > 1:
+            time.sleep(1)
 
         # Build assistant message with all content blocks
         assistant_content = []
