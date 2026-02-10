@@ -15,13 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dotenv import load_dotenv
 
-# Load environment variables from parent .env
+# Load environment variables from parent .env (local dev) or Railway env vars (production)
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
-
-from slack_bolt import App
-from slack_bolt.adapter.socket_mode import SocketModeHandler
-
-from brain import think
 
 # Configure logging
 logging.basicConfig(
@@ -29,12 +24,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger("ark")
-
-# Initialize Slack app
-app = App(
-    token=os.environ["SLACK_BOT_TOKEN"],
-    signing_secret=os.environ["SLACK_SIGNING_SECRET"],
-)
 
 
 def _clean_mention(text: str) -> str:
@@ -44,6 +33,8 @@ def _clean_mention(text: str) -> str:
 
 def _handle_message(event, say, client):
     """Core message handler - processes user message through Claude and responds."""
+    from brain import think
+
     text = event.get("text", "")
     if not text:
         return
@@ -112,22 +103,30 @@ def _handle_message(event, say, client):
         )
 
 
-@app.event("app_mention")
-def handle_mention(event, say, client):
-    """Handle @Ark mentions in channels."""
-    _handle_message(event, say, client)
+def main():
+    from slack_bolt import App
+    from slack_bolt.adapter.socket_mode import SocketModeHandler
 
+    logger.info("Starting Ark...")
 
-@app.event("message")
-def handle_dm(event, say, client):
-    """Handle direct messages to Ark."""
-    # Only respond to DMs, not channel messages (those go through app_mention)
-    if event.get("channel_type") == "im":
+    app = App(
+        token=os.environ["SLACK_BOT_TOKEN"],
+        signing_secret=os.environ["SLACK_SIGNING_SECRET"],
+    )
+
+    @app.event("app_mention")
+    def handle_mention(event, say, client):
         _handle_message(event, say, client)
 
+    @app.event("message")
+    def handle_dm(event, say, client):
+        if event.get("channel_type") == "im":
+            _handle_message(event, say, client)
 
-if __name__ == "__main__":
-    logger.info("Starting Ark...")
     handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
     logger.info("Ark is online. Listening for messages.")
     handler.start()
+
+
+if __name__ == "__main__":
+    main()
