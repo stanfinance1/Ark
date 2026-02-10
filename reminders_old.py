@@ -1,22 +1,13 @@
 """
-Ark - Reminder system (IMPROVED VERSION).
+Ark - Reminder system.
 Database and utilities for scheduling and managing reminders.
-
-Improvements:
-- Fixed monthly calculation bug (proper month arithmetic)
-- Extracted duplicate AM/PM parsing logic to helper
-- Simplified weekly calculation logic
-- Added input validation
-- Better error handling
-- Single consistent 'now' timestamp
 """
 
 import sqlite3
 import os
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict
 import re
-import calendar
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ark_memory.db")
 
@@ -160,39 +151,25 @@ class ReminderManager:
         if cadence == "daily":
             return current_fire + timedelta(days=1)
         elif cadence.startswith("weekly_"):
+            # weekly_monday, weekly_tuesday, etc.
             return current_fire + timedelta(weeks=1)
         elif cadence.startswith("monthly_"):
-            # IMPROVED: Proper month arithmetic
+            # monthly_1, monthly_15, etc.
+            # Add roughly 30 days, then adjust to correct day
+            next_month = current_fire + timedelta(days=30)
             day_of_month = int(cadence.split("_")[1])
-            year = current_fire.year
-            month = current_fire.month + 1
-
-            # Handle year rollover
-            if month > 12:
-                month = 1
-                year += 1
-
-            # Handle day overflow (e.g., Jan 31 -> Feb 31 doesn't exist)
-            max_day = calendar.monthrange(year, month)[1]
-            day = min(day_of_month, max_day)
-
-            return current_fire.replace(year=year, month=month, day=day)
+            try:
+                # Try to set to the same day in next month
+                return next_month.replace(day=day_of_month)
+            except ValueError:
+                # If day doesn't exist in that month, use last day
+                next_month = next_month.replace(day=1) + timedelta(days=32)
+                next_month = next_month.replace(day=1) - timedelta(days=1)
+                return next_month
         return None
 
 
-def _parse_time(hour: int, minute: int, ampm: Optional[str]) -> Tuple[int, int]:
-    """
-    Helper to convert 12-hour time with AM/PM to 24-hour format.
-    Returns (hour_24, minute).
-    """
-    if ampm == "pm" and hour < 12:
-        hour += 12
-    elif ampm == "am" and hour == 12:
-        hour = 0
-    return hour, minute
-
-
-def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
+def parse_reminder_time(text: str) -> tuple[Optional[datetime], Optional[str]]:
     """
     Parse natural language time expressions into datetime and cadence type.
     Returns (fire_time, cadence) or (None, None) if can't parse.
@@ -205,7 +182,7 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
     - "monthly on the 1st at 10am", "on the 15th of each month at 12pm"
     """
     text = text.lower().strip()
-    now = datetime.now()  # Single consistent timestamp
+    now = datetime.now()
 
     # Pattern: "in X minutes/hours/days"
     match = re.search(r"in (\d+)\s+(minute|minutes|min|hour|hours|hr|day|days)", text)
@@ -227,7 +204,11 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
             hour = int(time_match.group(1))
             minute = int(time_match.group(2) or 0)
             ampm = time_match.group(3)
-            hour, minute = _parse_time(hour, minute, ampm)
+
+            if ampm == "pm" and hour < 12:
+                hour += 12
+            elif ampm == "am" and hour == 12:
+                hour = 0
 
             fire_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if fire_time <= now:
@@ -252,18 +233,25 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
                 hour = int(time_match.group(1))
                 minute = int(time_match.group(2) or 0)
                 ampm = time_match.group(3)
-                hour, minute = _parse_time(hour, minute, ampm)
 
-                # IMPROVED: Simpler weekly calculation
+                if ampm == "pm" and hour < 12:
+                    hour += 12
+                elif ampm == "am" and hour == 12:
+                    hour = 0
+
+                # Calculate next occurrence of this weekday
                 days_ahead = (day_num - now.weekday()) % 7
-                fire_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-                # If it's today but time has passed, schedule for next week
-                if days_ahead == 0 and fire_time <= now:
-                    days_ahead = 7
-
-                fire_time = now + timedelta(days=days_ahead)
-                fire_time = fire_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if days_ahead == 0:
+                    # Today is the day - check if time has passed
+                    fire_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    if fire_time <= now:
+                        days_ahead = 7
+                    else:
+                        fire_time = now + timedelta(days=days_ahead)
+                        fire_time = fire_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                else:
+                    fire_time = now + timedelta(days=days_ahead)
+                    fire_time = fire_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
                 return fire_time, f"weekly_{day_name}"
 
@@ -271,45 +259,34 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
     monthly_match = re.search(r"(?:monthly|each month|every month).*?(?:on the |the )?(\d{1,2})(?:st|nd|rd|th)?", text)
     if monthly_match:
         day_of_month = int(monthly_match.group(1))
-
-        # IMPROVED: Validate day
-        if day_of_month < 1 or day_of_month > 31:
-            return None, None
-
         time_match = re.search(r"at (\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text)
+
         hour, minute = 9, 0  # Default to 9am if no time specified
         if time_match:
             hour = int(time_match.group(1))
             minute = int(time_match.group(2) or 0)
             ampm = time_match.group(3)
-            hour, minute = _parse_time(hour, minute, ampm)
+
+            if ampm == "pm" and hour < 12:
+                hour += 12
+            elif ampm == "am" and hour == 12:
+                hour = 0
 
         # Calculate next occurrence of this day
         try:
             fire_time = now.replace(day=day_of_month, hour=hour, minute=minute, second=0, microsecond=0)
             if fire_time <= now:
                 # Move to next month
-                month = now.month + 1
-                year = now.year
-                if month > 12:
-                    month = 1
-                    year += 1
-
-                # Handle day overflow
-                max_day = calendar.monthrange(year, month)[1]
-                day = min(day_of_month, max_day)
-                fire_time = fire_time.replace(year=year, month=month, day=day)
+                if now.month == 12:
+                    fire_time = fire_time.replace(year=now.year + 1, month=1)
+                else:
+                    fire_time = fire_time.replace(month=now.month + 1)
         except ValueError:
             # Day doesn't exist in current month, try next month
-            month = now.month + 1
-            year = now.year
-            if month > 12:
-                month = 1
-                year += 1
-
-            max_day = calendar.monthrange(year, month)[1]
-            day = min(day_of_month, max_day)
-            fire_time = datetime(year, month, day, hour, minute)
+            if now.month == 12:
+                fire_time = datetime(now.year + 1, 1, day_of_month, hour, minute)
+            else:
+                fire_time = datetime(now.year, now.month + 1, day_of_month, hour, minute)
 
         return fire_time, f"monthly_{day_of_month}"
 
@@ -320,7 +297,11 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
         hour = int(time_match.group(2))
         minute = int(time_match.group(3) or 0)
         ampm = time_match.group(4)
-        hour, minute = _parse_time(hour, minute, ampm)
+
+        if ampm == "pm" and hour < 12:
+            hour += 12
+        elif ampm == "am" and hour == 12:
+            hour = 0
 
         fire_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if day_offset == 0 and fire_time <= now:
