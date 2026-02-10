@@ -17,6 +17,10 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Tuple
 import re
 import calendar
+from zoneinfo import ZoneInfo
+
+# User timezone - all reminder times are parsed and displayed in this timezone
+USER_TIMEZONE = ZoneInfo("America/Los_Angeles")  # Pacific Time
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ark_memory.db")
 
@@ -75,14 +79,14 @@ class ReminderManager:
                     message,
                     cadence,
                     fire_time.isoformat(),
-                    datetime.now().isoformat(),
+                    datetime.now(USER_TIMEZONE).isoformat(),
                 ),
             )
             return cursor.lastrowid
 
     def get_due_reminders(self) -> List[Dict]:
         """Get all reminders that are due to fire now."""
-        now = datetime.now().isoformat()
+        now = datetime.now(USER_TIMEZONE).isoformat()
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
@@ -137,7 +141,7 @@ class ReminderManager:
             if cadence == "once":
                 conn.execute(
                     "UPDATE reminders SET status = 'completed', last_fired_at = ? WHERE id = ?",
-                    (datetime.now().isoformat(), reminder_id),
+                    (datetime.now(USER_TIMEZONE).isoformat(), reminder_id),
                 )
                 return
 
@@ -146,13 +150,13 @@ class ReminderManager:
             if next_fire:
                 conn.execute(
                     "UPDATE reminders SET next_fire_time = ?, last_fired_at = ? WHERE id = ?",
-                    (next_fire.isoformat(), datetime.now().isoformat(), reminder_id),
+                    (next_fire.isoformat(), datetime.now(USER_TIMEZONE).isoformat(), reminder_id),
                 )
             else:
                 # If can't calculate next (shouldn't happen), mark completed
                 conn.execute(
                     "UPDATE reminders SET status = 'completed', last_fired_at = ? WHERE id = ?",
-                    (datetime.now().isoformat(), reminder_id),
+                    (datetime.now(USER_TIMEZONE).isoformat(), reminder_id),
                 )
 
     def _calculate_next_fire(self, cadence: str, current_fire: datetime) -> Optional[datetime]:
@@ -203,9 +207,11 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
     - "daily at 9am", "every day at 10:30"
     - "every monday at 9am", "weekly on friday at 5pm"
     - "monthly on the 1st at 10am", "on the 15th of each month at 12pm"
+
+    All times are parsed in USER_TIMEZONE (Pacific Time).
     """
     text = text.lower().strip()
-    now = datetime.now()  # Single consistent timestamp
+    now = datetime.now(USER_TIMEZONE)  # Single consistent timestamp in user's timezone
 
     # Pattern: "in X minutes/hours/days"
     match = re.search(r"in (\d+)\s+(minute|minutes|min|hour|hours|hr|day|days)", text)

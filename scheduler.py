@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 from slack_sdk import WebClient
-from reminders import ReminderManager
+from reminders import ReminderManager, USER_TIMEZONE
 
 # Configure logging
 logging.basicConfig(
@@ -63,7 +63,7 @@ def fire_reminder(reminder: dict):
 
 def main():
     """Main scheduler loop - checks for due reminders every 30 seconds."""
-    logger.info("Ark reminder scheduler starting...")
+    logger.info(f"Ark reminder scheduler starting... (timezone: {USER_TIMEZONE})")
     manager = ReminderManager()
 
     while True:
@@ -72,7 +72,8 @@ def main():
             due_reminders = manager.get_due_reminders()
 
             if due_reminders:
-                logger.info(f"Found {len(due_reminders)} due reminder(s)")
+                now = datetime.now(USER_TIMEZONE)
+                logger.info(f"Found {len(due_reminders)} due reminder(s) at {now.strftime('%Y-%m-%d %I:%M %p %Z')}")
 
             for reminder in due_reminders:
                 # Fire the reminder

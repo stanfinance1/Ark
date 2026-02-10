@@ -162,7 +162,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "create_reminder",
-        "description": "Schedule a reminder to be sent at a specific time or on a recurring schedule. The reminder will be posted in the same channel where it was created, with an @mention to notify you. Supports one-time reminders (e.g. 'in 5 minutes', 'tomorrow at 3pm'), daily reminders (e.g. 'daily at 9am'), weekly reminders (e.g. 'every Monday at 10am'), and monthly reminders (e.g. 'monthly on the 15th at 2pm').",
+        "description": "Schedule a reminder to be sent at a specific time or on a recurring schedule. The reminder will be posted in the same channel where it was created, with an @mention to notify you. All times are in Pacific Time (US/Pacific). Supports one-time reminders (e.g. 'in 5 minutes', 'tomorrow at 3pm'), daily reminders (e.g. 'daily at 9am'), weekly reminders (e.g. 'every Monday at 10am'), and monthly reminders (e.g. 'monthly on the 15th at 2pm').",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -172,7 +172,7 @@ TOOL_DEFINITIONS = [
                 },
                 "when": {
                     "type": "string",
-                    "description": "Natural language description of when to send the reminder. Examples: 'in 30 minutes', 'tomorrow at 3pm', 'daily at 9am', 'every Monday at 10am', 'monthly on the 1st at 9am'.",
+                    "description": "Natural language description of when to send the reminder in Pacific Time. Examples: 'in 30 minutes', 'tomorrow at 3pm', 'daily at 9am', 'every Monday at 10am', 'monthly on the 1st at 9am'.",
                 },
             },
             "required": ["message", "when"],
@@ -180,7 +180,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "list_reminders",
-        "description": "List all active reminders for the current user. Shows reminder ID, message, next fire time, and cadence (one-time, daily, weekly, monthly).",
+        "description": "List all active reminders for the current user. Shows reminder ID, message, next fire time in Pacific Time, and cadence (one-time, daily, weekly, monthly).",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -522,12 +522,15 @@ def _create_reminder(message: str, when: str, slack_context: dict) -> str:
 
     quote = random.choice(nautical_quotes)
 
-    return f"Reminder created (ID: {reminder_id})\n\nMessage: {message}\nFirst reminder: {fire_time.strftime('%Y-%m-%d at %I:%M %p')}\nCadence: {cadence_text}\n\nI'll send a message in this {'thread' if thread_ts else 'channel'} and @mention you when it's time.\n\n{quote}"
+    # Get timezone name for display
+    tz_name = fire_time.strftime("%Z")  # PST or PDT
+
+    return f"Reminder created (ID: {reminder_id})\n\nMessage: {message}\nFirst reminder: {fire_time.strftime('%Y-%m-%d at %I:%M %p')} {tz_name}\nCadence: {cadence_text}\n\nI'll send a message in this {'thread' if thread_ts else 'channel'} and @mention you when it's time.\n\n{quote}"
 
 
 def _list_reminders(slack_context: dict) -> str:
     """List all active reminders for the user."""
-    from reminders import ReminderManager
+    from reminders import ReminderManager, USER_TIMEZONE
     from datetime import datetime
 
     if not slack_context:
@@ -540,7 +543,11 @@ def _list_reminders(slack_context: dict) -> str:
     if not reminders:
         return "You have no active reminders."
 
-    lines = ["Your active reminders:\n"]
+    # Get current time in user's timezone
+    now = datetime.now(USER_TIMEZONE)
+    tz_name = now.strftime("%Z")  # PST or PDT
+
+    lines = [f"You have {len(reminders)} active reminder(s):\n"]
     for r in reminders:
         fire_time = datetime.fromisoformat(r["next_fire_time"])
         cadence = r["cadence"]
@@ -559,8 +566,8 @@ def _list_reminders(slack_context: dict) -> str:
         else:
             cadence_text = cadence
 
-        lines.append(f"ID {r['id']}: \"{r['message']}\"")
-        lines.append(f"  Next: {fire_time.strftime('%Y-%m-%d at %I:%M %p')} ({cadence_text})")
+        lines.append(f"**ID {r['id']}:** \"{r['message']}\"")
+        lines.append(f"Next: **{fire_time.strftime('%Y-%m-%d at %I:%M %p')} {tz_name}** ({cadence_text})")
         lines.append("")
 
     return "\n".join(lines).strip()
