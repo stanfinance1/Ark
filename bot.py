@@ -9,6 +9,8 @@ import os
 import re
 import sys
 import logging
+import urllib.request
+import time
 
 # Add ark directory to path so imports work
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -31,21 +33,84 @@ def _clean_mention(text: str) -> str:
     return re.sub(r"<@[A-Z0-9]+>", "", text).strip()
 
 
+def _download_slack_files(files: list) -> list:
+    """Download files attached to a Slack message to tmp/uploads/."""
+    upload_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "tmp", "uploads"
+    )
+    os.makedirs(upload_dir, exist_ok=True)
+
+    token = os.environ["SLACK_BOT_TOKEN"].strip()
+    downloaded = []
+
+    for f in files:
+        url = f.get("url_private_download")
+        name = f.get("name", "unknown_file")
+        if not url:
+            continue
+
+        # Prefix with timestamp to avoid collisions
+        safe_name = f"{int(time.time())}_{name}"
+        save_path = os.path.join(upload_dir, safe_name)
+
+        try:
+            req = urllib.request.Request(
+                url, headers={"Authorization": f"Bearer {token}"}
+            )
+            with urllib.request.urlopen(req) as resp:
+                with open(save_path, "wb") as out:
+                    out.write(resp.read())
+
+            downloaded.append({
+                "name": name,
+                "path": save_path,
+                "size": f.get("size", 0),
+                "mimetype": f.get("mimetype", ""),
+            })
+            logger.info(f"Downloaded file: {name} -> {save_path}")
+        except Exception as e:
+            logger.error(f"Failed to download {name}: {e}")
+
+    return downloaded
+
+
 def _handle_message(event, say, client):
     """Core message handler - processes user message through Claude and responds."""
     from brain import think
 
     text = event.get("text", "")
-    if not text:
-        return
 
     # Ignore bot messages (avoid infinite loops)
     if event.get("bot_id"):
         return
 
-    clean_text = _clean_mention(text)
-    if not clean_text:
+    # Skip if no text AND no files
+    if not text and not event.get("files"):
         return
+
+    clean_text = _clean_mention(text)
+
+    # Download any files attached to the message
+    attached_files = event.get("files", [])
+    downloaded = []
+    if attached_files:
+        downloaded = _download_slack_files(attached_files)
+
+    # If no text but files were attached, set a default prompt
+    if not clean_text and not downloaded:
+        return
+    if not clean_text and downloaded:
+        clean_text = "I've shared some files with you. Please take a look."
+
+    # Append file context so Claude knows what was uploaded
+    if downloaded:
+        file_lines = ["\n\n[User attached files (downloaded to server):]"]
+        for d in downloaded:
+            file_lines.append(f"- {d['name']} -> {d['path']} ({d['mimetype']})")
+        file_lines.append(
+            "Use read_file for text/CSV files, or run_python with pandas for Excel files."
+        )
+        clean_text += "\n".join(file_lines)
 
     channel = event["channel"]
     thread_ts = event.get("thread_ts", event["ts"])
