@@ -7,13 +7,16 @@ import subprocess
 import os
 import sys
 import tempfile
+import logging
+import concurrent.futures
 
 import requests
-from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
+import trafilatura
+from ddgs import DDGS
 
 from config import BASE_DIR, TMP_DIR
 
+logger = logging.getLogger(__name__)
 PYTHON = sys.executable
 
 # Tool definitions in Claude API format
@@ -89,13 +92,13 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "web_search",
-        "description": "Search the internet using DuckDuckGo. Returns top results with titles, URLs, and snippets. Use this for weather, news, prices, company info, or any real-time information.",
+        "description": "Search the internet using DuckDuckGo. Returns top results with titles, URLs, and snippets. Good for quick lookups: weather, stock prices, simple facts. For in-depth research, use web_research instead.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query (e.g. 'NYC weather today', 'AAPL stock price', 'latest AI news').",
+                    "description": "Search query (e.g. 'NYC weather today', 'AAPL stock price').",
                 },
                 "max_results": {
                     "type": "integer",
@@ -108,7 +111,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "fetch_url",
-        "description": "Fetch a web page and extract its text content. Use this after web_search to read a specific page, or when a user shares a URL they want you to read.",
+        "description": "Fetch a web page and extract its main text content cleanly. Use this to read a specific URL (article, documentation, blog post). Returns clean article text, not raw HTML.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -118,11 +121,40 @@ TOOL_DEFINITIONS = [
                 },
                 "max_chars": {
                     "type": "integer",
-                    "description": "Maximum characters of text to return. Defaults to 5000.",
-                    "default": 5000,
+                    "description": "Maximum characters of text to return. Defaults to 10000.",
+                    "default": 10000,
                 },
             },
             "required": ["url"],
+        },
+    },
+    {
+        "name": "web_research",
+        "description": "All-in-one web research tool. Searches the web AND automatically reads the top results in a single call. Returns search results with full article content extracted from the best pages. Use this for any research question - it's faster than calling web_search + fetch_url separately. One call does it all.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Research question or search query (e.g. 'DTC subscription brands with $50 AOV benchmarks').",
+                },
+                "num_results": {
+                    "type": "integer",
+                    "description": "Number of search results to return. Defaults to 5.",
+                    "default": 5,
+                },
+                "fetch_top": {
+                    "type": "integer",
+                    "description": "Number of top results to auto-fetch full content from. Defaults to 3.",
+                    "default": 3,
+                },
+                "max_chars_per_page": {
+                    "type": "integer",
+                    "description": "Max characters to extract per page. Defaults to 8000.",
+                    "default": 8000,
+                },
+            },
+            "required": ["query"],
         },
     },
 ]
@@ -146,7 +178,14 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
         elif name == "web_search":
             return _web_search(inputs.get("query", ""), inputs.get("max_results", 5))
         elif name == "fetch_url":
-            return _fetch_url(inputs.get("url", ""), inputs.get("max_chars", 5000))
+            return _fetch_url(inputs.get("url", ""), inputs.get("max_chars", 10000))
+        elif name == "web_research":
+            return _web_research(
+                inputs.get("query", ""),
+                inputs.get("num_results", 5),
+                inputs.get("fetch_top", 3),
+                inputs.get("max_chars_per_page", 8000),
+            )
         else:
             return f"Error: Unknown tool '{name}'"
     except Exception as e:
@@ -155,7 +194,6 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
 
 def _run_python(code: str, description: str = "") -> str:
     """Execute Python code in a subprocess and return stdout + stderr."""
-    # Prepend helper variables so the code knows about project paths
     header = f"""
 import sys
 import os
@@ -165,7 +203,6 @@ os.makedirs(TMP_DIR, exist_ok=True)
 """
     full_code = header + "\n" + code
 
-    # Write to temp file and execute
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", dir=TMP_DIR, delete=False
     ) as f:
@@ -266,8 +303,7 @@ def _web_search(query: str, max_results: int = 5) -> str:
     if not query:
         return "Error: No search query provided."
     try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
+        results = list(DDGS().text(query, max_results=max_results))
         if not results:
             return f"No results found for: {query}"
         output = []
@@ -281,25 +317,113 @@ def _web_search(query: str, max_results: int = 5) -> str:
         return f"Error searching web: {e}"
 
 
-def _fetch_url(url: str, max_chars: int = 5000) -> str:
-    """Fetch a URL and extract readable text content."""
+def _fetch_url(url: str, max_chars: int = 10000) -> str:
+    """Fetch a URL and extract readable text using trafilatura."""
     if not url:
         return "Error: No URL provided."
     try:
-        resp = requests.get(url, timeout=15, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; Ark-Bot/1.0)"
-        })
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        # Remove script and style elements
-        for tag in soup(["script", "style", "nav", "footer", "header"]):
-            tag.decompose()
-        text = soup.get_text(separator="\n", strip=True)
+        # Download the page
+        downloaded = trafilatura.fetch_url(url)
+        if not downloaded:
+            # Fallback to requests if trafilatura fetch fails
+            resp = requests.get(url, timeout=15, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            })
+            resp.raise_for_status()
+            downloaded = resp.text
+
+        # Extract main content with trafilatura
+        text = trafilatura.extract(
+            downloaded,
+            include_links=True,
+            include_tables=True,
+            favor_recall=True,
+        )
+
+        if not text:
+            # Last resort: basic extraction
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(downloaded, "html.parser")
+            for tag in soup(["script", "style"]):
+                tag.decompose()
+            text = soup.get_text(separator="\n", strip=True)
+
+        if not text:
+            return "(page had no extractable text content)"
+
         if len(text) > max_chars:
             text = text[:max_chars] + "\n\n... (truncated)"
-        return text or "(page had no readable text)"
+        return text
     except Exception as e:
         return f"Error fetching URL: {e}"
+
+
+def _web_research(query: str, num_results: int = 5, fetch_top: int = 3, max_chars_per_page: int = 8000) -> str:
+    """All-in-one research: search + auto-fetch top results in parallel."""
+    if not query:
+        return "Error: No query provided."
+
+    # Step 1: Search
+    try:
+        results = list(DDGS().text(query, max_results=num_results))
+    except Exception as e:
+        return f"Error searching: {e}"
+
+    if not results:
+        return f"No results found for: {query}"
+
+    # Step 2: Build search results summary
+    output = [f"## Search Results for: {query}\n"]
+    for i, r in enumerate(results, 1):
+        output.append(f"{i}. **{r.get('title', 'No title')}**")
+        output.append(f"   URL: {r.get('href', '')}")
+        output.append(f"   {r.get('body', '')}")
+        output.append("")
+
+    # Step 3: Fetch top N results in parallel for full content
+    urls_to_fetch = []
+    for r in results[:fetch_top]:
+        url = r.get("href", "")
+        if url and not any(skip in url for skip in ["youtube.com", "reddit.com/r/", ".pdf"]):
+            urls_to_fetch.append((r.get("title", ""), url))
+
+    if urls_to_fetch:
+        output.append("\n---\n## Full Content from Top Results\n")
+
+        def fetch_one(title_url):
+            title, url = title_url
+            try:
+                downloaded = trafilatura.fetch_url(url)
+                if not downloaded:
+                    resp = requests.get(url, timeout=10, headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    })
+                    resp.raise_for_status()
+                    downloaded = resp.text
+                text = trafilatura.extract(
+                    downloaded,
+                    include_links=True,
+                    include_tables=True,
+                    favor_recall=True,
+                )
+                if text and len(text) > max_chars_per_page:
+                    text = text[:max_chars_per_page] + "\n... (truncated)"
+                return (title, url, text)
+            except Exception as e:
+                return (title, url, f"(failed to fetch: {e})")
+
+        # Fetch pages in parallel (3 at a time)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            fetched = list(executor.map(fetch_one, urls_to_fetch))
+
+        for title, url, text in fetched:
+            if text:
+                output.append(f"### {title}")
+                output.append(f"Source: {url}\n")
+                output.append(text)
+                output.append("\n---\n")
+
+    return "\n".join(output).strip()
 
 
 def _human_size(size_bytes: int) -> str:

@@ -71,13 +71,17 @@ You have access to Python execution, file operations, and web browsing:
 2. **read_file** - Read text files on the server
 3. **list_files** - Browse directory structure
 4. **upload_file** - Share generated files to Slack
-5. **web_search** - Search the internet (weather, news, stock prices, company info, anything)
-6. **fetch_url** - Read a specific web page's content
+5. **web_research** - PREFERRED for any research question. Searches the web AND auto-fetches the top results in one call. Use this first for any research task.
+6. **web_search** - Quick search for simple lookups (weather, stock price, single fact)
+7. **fetch_url** - Read a specific URL the user shared or you already know
 
 ### Web Browsing Guidelines:
-- Use **web_search** first to find relevant pages, then **fetch_url** to read specific ones
-- Great for: weather, stock prices, news, competitor info, market data, any real-time info
-- Keep it to 1-2 web calls per question when possible
+- **For research questions**: Use **web_research** - it searches AND reads the top pages in ONE call. This is your primary research tool.
+- **For simple lookups**: Use **web_search** alone (weather, stock prices, quick facts).
+- **For reading a specific URL**: Use **fetch_url** (e.g., user shares a link).
+- **NEVER fetch search engine URLs** (bing.com/search, google.com/search, etc.) - use web_search or web_research instead.
+- **One web_research call is usually enough.** Synthesize what you get rather than searching repeatedly.
+- Great for: industry benchmarks, competitor info, market data, news, any real-time info
 
 ### Key Libraries Available on Server:
 - Standard library (math, json, csv, datetime, etc.)
@@ -111,7 +115,8 @@ Every message includes a [From: Name (UserID)] header identifying the sender.
 - Use thread replies to keep channels clean
 - Never make up financial numbers - use the context above or say you don't know
 - If a tool call fails, don't retry the same thing - answer from context or explain what you'd need
-- Limit tool use to 2-3 calls per question max. If you can answer from context, just answer.
+- Limit tool use to 3-4 calls per question max. If you can answer from context, just answer.
+- For research: one web_research call + one follow-up fetch_url if needed. Don't chain 5+ searches.
 """.format(
     tmp_dir=TMP_DIR,
 )

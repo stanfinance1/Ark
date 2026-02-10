@@ -42,7 +42,7 @@ def think(user_text: str, channel: str, thread_ts: str, slack_context: dict = No
     )
 
     # Tool use loop - Claude may call tools multiple times
-    max_iterations = 5  # Safety limit to prevent runaway API calls
+    max_iterations = 10  # Safety limit to prevent runaway API calls
     iteration = 0
 
     while response.stop_reason == "tool_use" and iteration < max_iterations:
