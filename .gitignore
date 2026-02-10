@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.env
+ark_memory.db
+*.tmp
