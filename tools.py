@@ -162,7 +162,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "create_reminder",
-        "description": "Schedule a reminder to be sent at a specific time or on a recurring schedule. The reminder will be posted in the same channel where it was created, with an @mention to notify you. All times are in Pacific Time (US/Pacific). Supports one-time reminders (e.g. 'in 5 minutes', 'tomorrow at 3pm'), daily reminders (e.g. 'daily at 9am'), weekly reminders (e.g. 'every Monday at 10am'), and monthly reminders (e.g. 'monthly on the 15th at 2pm').",
+        "description": "Schedule a reminder to be sent at a specific time or on a recurring schedule. The reminder will be posted in the same channel where it was created, with an @mention to notify you. Supports timezones: add ET/EST/EDT (Eastern), CT/CST/CDT (Central), MT/MST/MDT (Mountain), PT/PST/PDT (Pacific), or UTC/GMT. If no timezone specified, defaults to Pacific Time. Supports one-time reminders (e.g. 'in 5 minutes', 'at 5pm ET'), daily reminders (e.g. 'daily at 9am Central'), weekly reminders (e.g. 'every Monday at 10am EST'), and monthly reminders (e.g. 'monthly on the 15th at 2pm').",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -172,7 +172,7 @@ TOOL_DEFINITIONS = [
                 },
                 "when": {
                     "type": "string",
-                    "description": "Natural language description of when to send the reminder in Pacific Time. Examples: 'in 30 minutes', 'tomorrow at 3pm', 'daily at 9am', 'every Monday at 10am', 'monthly on the 1st at 9am'.",
+                    "description": "Natural language description of when to send the reminder. Can include timezone (ET, CT, MT, PT, UTC). Examples: 'in 30 minutes', 'at 5pm ET', 'tomorrow at 3pm EST', 'daily at 9am Central', 'every Monday at 10am', 'monthly on the 1st at 9am'.",
                 },
             },
             "required": ["message", "when"],

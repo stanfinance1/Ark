@@ -17,13 +17,15 @@ def test_parse_reminder_time():
     print(f"Current time in Pacific: {now.strftime('%Y-%m-%d %I:%M %p %Z')}")
     print()
 
-    # Test cases
+    # Test cases - including timezone support
     test_cases = [
-        "at 10:14 PM",
-        "tomorrow at 3pm",
-        "in 30 minutes",
-        "daily at 9am",
-        "every Monday at 10am",
+        "at 10:14 PM",  # Default Pacific
+        "at 5pm ET",  # Eastern Time
+        "tomorrow at 3pm EST",  # Eastern (explicit)
+        "daily at 9am Central",  # Central Time
+        "every Monday at 10am PST",  # Pacific (explicit)
+        "at 2pm UTC",  # UTC
+        "in 30 minutes",  # Relative (no timezone)
     ]
 
     for test in test_cases:

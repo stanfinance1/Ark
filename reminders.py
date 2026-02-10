@@ -22,6 +22,33 @@ from zoneinfo import ZoneInfo
 # User timezone - all reminder times are parsed and displayed in this timezone
 USER_TIMEZONE = ZoneInfo("America/Los_Angeles")  # Pacific Time
 
+# Timezone mappings for common abbreviations
+TIMEZONE_MAP = {
+    # Pacific
+    "pt": "America/Los_Angeles",
+    "pst": "America/Los_Angeles",
+    "pdt": "America/Los_Angeles",
+    "pacific": "America/Los_Angeles",
+    # Mountain
+    "mt": "America/Denver",
+    "mst": "America/Denver",
+    "mdt": "America/Denver",
+    "mountain": "America/Denver",
+    # Central
+    "ct": "America/Chicago",
+    "cst": "America/Chicago",
+    "cdt": "America/Chicago",
+    "central": "America/Chicago",
+    # Eastern
+    "et": "America/New_York",
+    "est": "America/New_York",
+    "edt": "America/New_York",
+    "eastern": "America/New_York",
+    # UTC
+    "utc": "UTC",
+    "gmt": "UTC",
+}
+
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ark_memory.db")
 
 
@@ -196,6 +223,26 @@ def _parse_time(hour: int, minute: int, ampm: Optional[str]) -> Tuple[int, int]:
     return hour, minute
 
 
+def _extract_timezone(text: str) -> Tuple[str, Optional[ZoneInfo]]:
+    """
+    Extract timezone from text if present.
+    Returns (text_without_tz, timezone) or (original_text, None).
+    """
+    text_lower = text.lower()
+
+    # Check for timezone abbreviations at the end of common time patterns
+    # e.g. "at 3pm ET", "tomorrow at 5pm EST", "daily at 9am Pacific"
+    for tz_abbr, tz_name in TIMEZONE_MAP.items():
+        # Pattern: time expression followed by timezone
+        pattern = r'\b' + re.escape(tz_abbr) + r'\b'
+        if re.search(pattern, text_lower):
+            # Remove the timezone from text
+            cleaned_text = re.sub(pattern, '', text_lower).strip()
+            return cleaned_text, ZoneInfo(tz_name)
+
+    return text, None
+
+
 def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
     """
     Parse natural language time expressions into datetime and cadence type.
@@ -207,14 +254,23 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
     - "daily at 9am", "every day at 10:30"
     - "every monday at 9am", "weekly on friday at 5pm"
     - "monthly on the 1st at 10am", "on the 15th of each month at 12pm"
+    - Timezone support: "at 5pm ET", "tomorrow at 3pm EST", "daily at 9am Pacific"
 
-    All times are parsed in USER_TIMEZONE (Pacific Time).
+    If no timezone is specified, defaults to USER_TIMEZONE (Pacific Time).
+    All times are converted to Pacific Time for storage.
     """
     text = text.lower().strip()
-    now = datetime.now(USER_TIMEZONE)  # Single consistent timestamp in user's timezone
+
+    # Extract timezone from text if present
+    text_clean, input_timezone = _extract_timezone(text)
+    if input_timezone is None:
+        input_timezone = USER_TIMEZONE
+
+    # Use input timezone for parsing, but get "now" in that timezone
+    now = datetime.now(input_timezone)
 
     # Pattern: "in X minutes/hours/days"
-    match = re.search(r"in (\d+)\s+(minute|minutes|min|hour|hours|hr|day|days)", text)
+    match = re.search(r"in (\d+)\s+(minute|minutes|min|hour|hours|hr|day|days)", text_clean)
     if match:
         amount = int(match.group(1))
         unit = match.group(2)
@@ -224,11 +280,14 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
             fire_time = now + timedelta(hours=amount)
         elif "day" in unit:
             fire_time = now + timedelta(days=amount)
+        # Convert to Pacific Time if parsed in different timezone
+        if input_timezone != USER_TIMEZONE:
+            fire_time = fire_time.astimezone(USER_TIMEZONE)
         return fire_time, "once"
 
     # Daily patterns
-    if "daily" in text or "every day" in text:
-        time_match = re.search(r"at (\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text)
+    if "daily" in text_clean or "every day" in text_clean:
+        time_match = re.search(r"at (\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text_clean)
         if time_match:
             hour = int(time_match.group(1))
             minute = int(time_match.group(2) or 0)
@@ -238,6 +297,9 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
             fire_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if fire_time <= now:
                 fire_time += timedelta(days=1)
+            # Convert to Pacific Time if parsed in different timezone
+            if input_timezone != USER_TIMEZONE:
+                fire_time = fire_time.astimezone(USER_TIMEZONE)
             return fire_time, "daily"
 
     # Weekly patterns
@@ -252,8 +314,8 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
     }
 
     for day_name, day_num in days_map.items():
-        if day_name in text and ("every" in text or "weekly" in text):
-            time_match = re.search(r"at (\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text)
+        if day_name in text_clean and ("every" in text_clean or "weekly" in text_clean):
+            time_match = re.search(r"at (\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text_clean)
             if time_match:
                 hour = int(time_match.group(1))
                 minute = int(time_match.group(2) or 0)
@@ -271,10 +333,14 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
                 fire_time = now + timedelta(days=days_ahead)
                 fire_time = fire_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
+                # Convert to Pacific Time if parsed in different timezone
+                if input_timezone != USER_TIMEZONE:
+                    fire_time = fire_time.astimezone(USER_TIMEZONE)
+
                 return fire_time, f"weekly_{day_name}"
 
     # Monthly patterns
-    monthly_match = re.search(r"(?:monthly|each month|every month).*?(?:on the |the )?(\d{1,2})(?:st|nd|rd|th)?", text)
+    monthly_match = re.search(r"(?:monthly|each month|every month).*?(?:on the |the )?(\d{1,2})(?:st|nd|rd|th)?", text_clean)
     if monthly_match:
         day_of_month = int(monthly_match.group(1))
 
@@ -282,7 +348,7 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
         if day_of_month < 1 or day_of_month > 31:
             return None, None
 
-        time_match = re.search(r"at (\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text)
+        time_match = re.search(r"at (\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text_clean)
         hour, minute = 9, 0  # Default to 9am if no time specified
         if time_match:
             hour = int(time_match.group(1))
@@ -315,12 +381,16 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
 
             max_day = calendar.monthrange(year, month)[1]
             day = min(day_of_month, max_day)
-            fire_time = datetime(year, month, day, hour, minute)
+            fire_time = datetime(year, month, day, hour, minute, tzinfo=input_timezone)
+
+        # Convert to Pacific Time if parsed in different timezone
+        if input_timezone != USER_TIMEZONE:
+            fire_time = fire_time.astimezone(USER_TIMEZONE)
 
         return fire_time, f"monthly_{day_of_month}"
 
     # Simple time today/tomorrow patterns
-    time_match = re.search(r"(today|tomorrow)?\s*at (\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text)
+    time_match = re.search(r"(today|tomorrow)?\s*at (\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text_clean)
     if time_match:
         day_offset = 1 if time_match.group(1) == "tomorrow" else 0
         hour = int(time_match.group(2))
@@ -333,6 +403,10 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
             fire_time += timedelta(days=1)
         else:
             fire_time += timedelta(days=day_offset)
+
+        # Convert to Pacific Time if parsed in different timezone
+        if input_timezone != USER_TIMEZONE:
+            fire_time = fire_time.astimezone(USER_TIMEZONE)
 
         return fire_time, "once"
 
