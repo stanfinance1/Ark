@@ -160,6 +160,46 @@ TOOL_DEFINITIONS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "create_reminder",
+        "description": "Schedule a reminder to be sent at a specific time or on a recurring schedule. The reminder will be posted in the same channel where it was created, with an @mention to notify you. Supports one-time reminders (e.g. 'in 5 minutes', 'tomorrow at 3pm'), daily reminders (e.g. 'daily at 9am'), weekly reminders (e.g. 'every Monday at 10am'), and monthly reminders (e.g. 'monthly on the 15th at 2pm').",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The reminder message to send (e.g. 'Review weekly metrics', 'Follow up with supplier').",
+                },
+                "when": {
+                    "type": "string",
+                    "description": "Natural language description of when to send the reminder. Examples: 'in 30 minutes', 'tomorrow at 3pm', 'daily at 9am', 'every Monday at 10am', 'monthly on the 1st at 9am'.",
+                },
+            },
+            "required": ["message", "when"],
+        },
+    },
+    {
+        "name": "list_reminders",
+        "description": "List all active reminders for the current user. Shows reminder ID, message, next fire time, and cadence (one-time, daily, weekly, monthly).",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "cancel_reminder",
+        "description": "Cancel an active reminder by its ID. Use list_reminders first to see all active reminders and their IDs.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reminder_id": {
+                    "type": "integer",
+                    "description": "The ID of the reminder to cancel (get this from list_reminders).",
+                },
+            },
+            "required": ["reminder_id"],
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -243,6 +283,12 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
                 inputs.get("fetch_top", 2),
                 inputs.get("max_chars_per_page", 3000),
             )
+        elif name == "create_reminder":
+            return _create_reminder(inputs.get("message", ""), inputs.get("when", ""), slack_context)
+        elif name == "list_reminders":
+            return _list_reminders(slack_context)
+        elif name == "cancel_reminder":
+            return _cancel_reminder(inputs.get("reminder_id"), slack_context)
         else:
             return f"Error: Unknown tool '{name}'"
     except Exception as e:
@@ -400,3 +446,140 @@ def _web_research(query: str, num_results: int = 5, fetch_top: int = 2, max_char
                     output.extend([f"### {title}", f"Source: {url}\n", text, "\n---\n"])
 
     return "\n".join(output).strip()
+
+
+def _create_reminder(message: str, when: str, slack_context: dict) -> str:
+    """Create a new reminder."""
+    import random
+    from reminders import ReminderManager, parse_reminder_time
+
+    if not message or not when:
+        return "Error: Both 'message' and 'when' are required."
+
+    if not slack_context:
+        return "Error: No Slack context available."
+
+    # Parse the time expression
+    fire_time, cadence = parse_reminder_time(when)
+    if not fire_time or not cadence:
+        return f"Error: Could not parse time expression '{when}'. Try something like: 'in 30 minutes', 'tomorrow at 3pm', 'daily at 9am', 'every Monday at 10am', or 'monthly on the 15th at 2pm'."
+
+    # Get user info from context
+    user_id = slack_context.get("user_id", "unknown")
+    user_name = slack_context.get("user_name", "unknown")
+    channel = slack_context.get("channel")
+    thread_ts = slack_context.get("thread_ts")
+
+    # Create the reminder
+    manager = ReminderManager()
+    reminder_id = manager.create_reminder(
+        user_id=user_id,
+        user_name=user_name,
+        channel=channel,
+        message=message,
+        cadence=cadence,
+        fire_time=fire_time,
+        thread_ts=thread_ts,
+    )
+
+    # Format response based on cadence
+    cadence_display = {
+        "once": "one-time",
+        "daily": "daily",
+    }
+    if cadence.startswith("weekly_"):
+        day = cadence.split("_")[1].capitalize()
+        cadence_display[cadence] = f"weekly (every {day})"
+    elif cadence.startswith("monthly_"):
+        day_num = cadence.split("_")[1]
+        cadence_display[cadence] = f"monthly (on the {day_num})"
+
+    cadence_text = cadence_display.get(cadence, cadence)
+
+    # Nautical quotes from classic sea adventure literature
+    nautical_quotes = [
+        "\"The sea finds out everything you did wrong.\" - Francis Stokes",
+        "\"Twenty years from now you will be more disappointed by the things you didn't do than by the ones you did do.\" - Mark Twain",
+        "\"I must go down to the seas again, to the lonely sea and the sky.\" - John Masefield",
+        "\"The cure for anything is salt water: sweat, tears, or the sea.\" - Isak Dinesen",
+        "\"It is not the ship so much as the skillful sailing that assures the prosperous voyage.\" - George William Curtis",
+        "\"A smooth sea never made a skilled sailor.\" - Franklin D. Roosevelt",
+        "\"The sea does not reward those who are too anxious, too greedy, or too impatient.\" - Anne Morrow Lindbergh",
+        "\"We must free ourselves of the hope that the sea will ever rest. We must learn to sail in high winds.\" - Aristotle Onassis",
+        "\"The voice of the sea speaks to the soul.\" - Kate Chopin",
+        "\"He that will not sail till all dangers are over must never put to sea.\" - Thomas Fuller",
+        "\"There is nothing more enticing, disenchanting, and enslaving than the life at sea.\" - Joseph Conrad",
+        "\"The sea, once it casts its spell, holds one in its net of wonder forever.\" - Jacques Cousteau",
+        "\"In the waves of change we find our true direction.\" - Unknown",
+        "\"You can't stop the waves, but you can learn to surf.\" - Jon Kabat-Zinn",
+        "\"The pessimist complains about the wind; the optimist expects it to change; the realist adjusts the sails.\" - William Arthur Ward",
+        "\"A ship in harbor is safe, but that is not what ships are built for.\" - John A. Shedd",
+        "\"To reach a port we must set sail.\" - Franklin D. Roosevelt",
+        "\"There are good ships and there are wood ships, but the best ships are friendships.\" - Irish Proverb",
+        "\"The sea is the same as it has been since before men ever went on it in boats.\" - Ernest Hemingway",
+        "\"For whatever we lose, it's always ourselves we find in the sea.\" - E.E. Cummings",
+    ]
+
+    quote = random.choice(nautical_quotes)
+
+    return f"Reminder created (ID: {reminder_id})\n\nMessage: {message}\nFirst reminder: {fire_time.strftime('%Y-%m-%d at %I:%M %p')}\nCadence: {cadence_text}\n\nI'll send a message in this {'thread' if thread_ts else 'channel'} and @mention you when it's time.\n\n{quote}"
+
+
+def _list_reminders(slack_context: dict) -> str:
+    """List all active reminders for the user."""
+    from reminders import ReminderManager
+    from datetime import datetime
+
+    if not slack_context:
+        return "Error: No Slack context available."
+
+    user_id = slack_context.get("user_id", "unknown")
+    manager = ReminderManager()
+    reminders = manager.get_user_reminders(user_id)
+
+    if not reminders:
+        return "You have no active reminders."
+
+    lines = ["Your active reminders:\n"]
+    for r in reminders:
+        fire_time = datetime.fromisoformat(r["next_fire_time"])
+        cadence = r["cadence"]
+
+        # Format cadence nicely
+        if cadence == "once":
+            cadence_text = "one-time"
+        elif cadence == "daily":
+            cadence_text = "daily"
+        elif cadence.startswith("weekly_"):
+            day = cadence.split("_")[1].capitalize()
+            cadence_text = f"every {day}"
+        elif cadence.startswith("monthly_"):
+            day_num = cadence.split("_")[1]
+            cadence_text = f"monthly on the {day_num}"
+        else:
+            cadence_text = cadence
+
+        lines.append(f"ID {r['id']}: \"{r['message']}\"")
+        lines.append(f"  Next: {fire_time.strftime('%Y-%m-%d at %I:%M %p')} ({cadence_text})")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def _cancel_reminder(reminder_id: int, slack_context: dict) -> str:
+    """Cancel a reminder."""
+    from reminders import ReminderManager
+
+    if not slack_context:
+        return "Error: No Slack context available."
+
+    if not reminder_id:
+        return "Error: reminder_id is required."
+
+    user_id = slack_context.get("user_id", "unknown")
+    manager = ReminderManager()
+
+    if manager.cancel_reminder(reminder_id, user_id):
+        return f"Reminder {reminder_id} has been cancelled."
+    else:
+        return f"Could not cancel reminder {reminder_id}. Either it doesn't exist or it's not yours to cancel."

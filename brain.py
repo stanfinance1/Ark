@@ -60,6 +60,11 @@ def think(user_text: str, channel: str, thread_ts: str, slack_context: dict = No
     Process a user message through Claude with tool use.
     Returns dict with 'text' (response) and 'files' (list of file paths to upload).
     """
+    # Add user identity to slack_context so tools can access it
+    if slack_context:
+        slack_context["user_id"] = user_id
+        slack_context["user_name"] = user_name
+
     # Load conversation history
     history = memory.get_history(channel, thread_ts)
 
