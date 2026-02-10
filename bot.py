@@ -145,7 +145,7 @@ def _handle_message(event, say, client):
             pass  # Reaction might fail if already added
 
         # Process through Claude
-        result = think(clean_text, channel, thread_ts, slack_context, user_name)
+        result = think(clean_text, channel, thread_ts, slack_context, user_name, user_id)
 
         # Remove "thinking" reaction
         try:

@@ -18,7 +18,7 @@ client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", "").str
 memory = ConversationMemory()
 
 
-def think(user_text: str, channel: str, thread_ts: str, slack_context: dict = None, user_name: str = "unknown") -> dict:
+def think(user_text: str, channel: str, thread_ts: str, slack_context: dict = None, user_name: str = "unknown", user_id: str = "unknown") -> dict:
     """
     Process a user message through Claude with tool use.
     Returns dict with 'text' (response) and 'files' (list of file paths to upload).
@@ -27,7 +27,7 @@ def think(user_text: str, channel: str, thread_ts: str, slack_context: dict = No
     history = memory.get_history(channel, thread_ts)
 
     # Add the new user message with sender identity
-    history.append({"role": "user", "content": f"[From: {user_name}]\n{user_text}"})
+    history.append({"role": "user", "content": f"[From: {user_name} ({user_id})]\n{user_text}"})
 
     # Track files generated during tool use (for Slack upload)
     generated_files = []
