@@ -114,9 +114,17 @@ def _handle_message(event, say, client):
 
     channel = event["channel"]
     thread_ts = event.get("thread_ts", event["ts"])
-    user = event.get("user", "unknown")
+    user_id = event.get("user", "unknown")
 
-    logger.info(f"Message from {user} in {channel}: {clean_text[:100]}...")
+    # Resolve user's real name from Slack
+    user_name = user_id
+    try:
+        user_info = client.users_info(user=user_id)
+        user_name = user_info["user"]["real_name"]
+    except Exception:
+        pass
+
+    logger.info(f"Message from {user_name} in {channel}: {clean_text[:100]}...")
 
     # Build Slack context for tool execution (file uploads, etc.)
     slack_context = {
@@ -137,7 +145,7 @@ def _handle_message(event, say, client):
             pass  # Reaction might fail if already added
 
         # Process through Claude
-        result = think(clean_text, channel, thread_ts, slack_context)
+        result = think(clean_text, channel, thread_ts, slack_context, user_name)
 
         # Remove "thinking" reaction
         try:
@@ -158,7 +166,7 @@ def _handle_message(event, say, client):
                 response_text = response_text[3900:]
                 say(text=chunk, thread_ts=thread_ts)
 
-        logger.info(f"Replied to {user} ({len(result['text'])} chars)")
+        logger.info(f"Replied to {user_name} ({len(result['text'])} chars)")
 
     except Exception as e:
         logger.error(f"Error processing message: {e}", exc_info=True)
