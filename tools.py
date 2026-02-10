@@ -124,8 +124,8 @@ TOOL_DEFINITIONS = [
                 },
                 "max_chars": {
                     "type": "integer",
-                    "description": "Maximum characters of text to return. Defaults to 10000.",
-                    "default": 10000,
+                    "description": "Maximum characters of text to return. Defaults to 5000.",
+                    "default": 5000,
                 },
             },
             "required": ["url"],
@@ -148,13 +148,13 @@ TOOL_DEFINITIONS = [
                 },
                 "fetch_top": {
                     "type": "integer",
-                    "description": "Number of top results to auto-fetch full content from. Defaults to 3.",
-                    "default": 3,
+                    "description": "Number of top results to auto-fetch full content from. Defaults to 2.",
+                    "default": 2,
                 },
                 "max_chars_per_page": {
                     "type": "integer",
-                    "description": "Max characters to extract per page. Defaults to 8000.",
-                    "default": 8000,
+                    "description": "Max characters to extract per page. Defaults to 3000.",
+                    "default": 3000,
                 },
             },
             "required": ["query"],
@@ -235,13 +235,13 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
         elif name == "web_search":
             return _web_search(inputs.get("query", ""), inputs.get("max_results", 5))
         elif name == "fetch_url":
-            return _fetch_url(inputs.get("url", ""), inputs.get("max_chars", 10000))
+            return _fetch_url(inputs.get("url", ""), inputs.get("max_chars", 5000))
         elif name == "web_research":
             return _web_research(
                 inputs.get("query", ""),
                 inputs.get("num_results", 5),
-                inputs.get("fetch_top", 3),
-                inputs.get("max_chars_per_page", 8000),
+                inputs.get("fetch_top", 2),
+                inputs.get("max_chars_per_page", 3000),
             )
         else:
             return f"Error: Unknown tool '{name}'"
@@ -350,7 +350,7 @@ def _web_search(query: str, max_results: int = 5) -> str:
         return f"Error searching web: {e}"
 
 
-def _fetch_url(url: str, max_chars: int = 10000) -> str:
+def _fetch_url(url: str, max_chars: int = 5000) -> str:
     """Fetch a single URL and extract clean text."""
     if not url:
         return "Error: No URL provided."
@@ -361,7 +361,7 @@ def _fetch_url(url: str, max_chars: int = 10000) -> str:
         return f"Error fetching URL: {e}"
 
 
-def _web_research(query: str, num_results: int = 5, fetch_top: int = 3, max_chars_per_page: int = 8000) -> str:
+def _web_research(query: str, num_results: int = 5, fetch_top: int = 2, max_chars_per_page: int = 3000) -> str:
     """All-in-one: search + auto-fetch top results in parallel."""
     if not query:
         return "Error: No query provided."
