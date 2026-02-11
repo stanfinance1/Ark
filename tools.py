@@ -200,6 +200,55 @@ TOOL_DEFINITIONS = [
             "required": ["reminder_id"],
         },
     },
+    {
+        "name": "send_slack_dm",
+        "description": "Send a direct message to a Slack workspace member by their name. Looks up the user by display name or real name (case-insensitive, partial match). Use this when Stan asks you to message someone, notify someone, or send a DM. Returns the user's email address if available (useful for scheduling meetings).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "recipient_name": {
+                    "type": "string",
+                    "description": "Name of the person to message (e.g. 'Sarah', 'Sarah Jones'). Matches against display name, real name, or first name.",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "The message to send to the user.",
+                },
+            },
+            "required": ["recipient_name", "message"],
+        },
+    },
+    {
+        "name": "schedule_meeting",
+        "description": "Create a Google Calendar event with a Google Meet video link. Automatically sends email invitations to all attendees. Use this when Stan asks to schedule a meeting, call, or sync. You MUST resolve attendee names to email addresses first -- use send_slack_dm tool to message them and get their email. The start_time must be an ISO format datetime string in Pacific Time (e.g. '2026-02-12T14:00:00').",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Event title/subject (e.g. 'Q1 Planning Sync', '1:1 with Sarah').",
+                },
+                "start_time": {
+                    "type": "string",
+                    "description": "Event start time in ISO format, Pacific Time (e.g. '2026-02-12T14:00:00'). You must convert natural language times to this format.",
+                },
+                "duration_minutes": {
+                    "type": "integer",
+                    "description": "Meeting duration in minutes. Defaults to 30.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional event description or agenda.",
+                },
+                "attendee_emails": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of attendee email addresses. Stan is automatically included. Get emails from send_slack_dm results or ask the user.",
+                },
+            },
+            "required": ["title", "start_time"],
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -289,6 +338,21 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
             return _list_reminders(slack_context)
         elif name == "cancel_reminder":
             return _cancel_reminder(inputs.get("reminder_id"), slack_context)
+        elif name == "send_slack_dm":
+            return _send_slack_dm(
+                inputs.get("recipient_name", ""),
+                inputs.get("message", ""),
+                slack_context,
+            )
+        elif name == "schedule_meeting":
+            return _schedule_meeting(
+                inputs.get("title", ""),
+                inputs.get("start_time", ""),
+                inputs.get("duration_minutes", 30),
+                inputs.get("description", ""),
+                inputs.get("attendee_emails", []),
+                slack_context,
+            )
         else:
             return f"Error: Unknown tool '{name}'"
     except Exception as e:
@@ -590,3 +654,101 @@ def _cancel_reminder(reminder_id: int, slack_context: dict) -> str:
         return f"Reminder {reminder_id} has been cancelled."
     else:
         return f"Could not cancel reminder {reminder_id}. Either it doesn't exist or it's not yours to cancel."
+
+
+def _send_slack_dm(recipient_name, message, slack_context):
+    """Send a DM to a Slack user by name. Admin-only (Stan)."""
+    from slack_users import lookup_user
+
+    if not recipient_name or not message:
+        return "Error: Both 'recipient_name' and 'message' are required."
+    if not slack_context:
+        return "Error: No Slack context available."
+
+    # Admin-only: only Stan can send DMs through Ark
+    if slack_context.get("user_id") != "U086HEJAUTH":
+        return "Error: Only Stan can use send_slack_dm."
+
+    client = slack_context.get("client")
+    if not client:
+        return "Error: Missing Slack client."
+
+    try:
+        user, partial_matches = lookup_user(client, recipient_name)
+    except Exception as e:
+        return f"Error looking up user: {e}"
+
+    if not user and not partial_matches:
+        return f"No user found matching '{recipient_name}'. Check the spelling or try a different name."
+
+    if not user and partial_matches:
+        names = [f"- {m['real_name']} ({m['display_name']})" for m in partial_matches[:5]]
+        return f"Multiple users match '{recipient_name}'. Please be more specific:\n" + "\n".join(names)
+
+    # Send DM directly using user ID as channel (works with chat:write scope)
+    try:
+        client.chat_postMessage(channel=user["id"], text=message)
+    except Exception as e:
+        return f"Error sending message to {user['real_name']}: {e}"
+
+    result = f"Message sent to {user['real_name']}"
+    if user.get("display_name"):
+        result += f" (@{user['display_name']})"
+    if user.get("email"):
+        result += f"\nEmail: {user['email']}"
+
+    return result
+
+
+def _schedule_meeting(title, start_time_str, duration_minutes, description, attendee_emails, slack_context=None):
+    """Schedule a Google Calendar meeting with Meet link. Admin-only (Stan)."""
+    from datetime import datetime
+    from google_calendar import create_event, USER_TIMEZONE
+
+    # Admin-only: only Stan can schedule meetings through Ark
+    if not slack_context or slack_context.get("user_id") != "U086HEJAUTH":
+        return "Error: Only Stan can use schedule_meeting."
+
+    if not title:
+        return "Error: 'title' is required."
+    if not start_time_str:
+        return "Error: 'start_time' is required (ISO format, e.g. '2026-02-12T14:00:00')."
+
+    # Parse the start time
+    try:
+        start_time = datetime.fromisoformat(start_time_str)
+        if start_time.tzinfo is None:
+            start_time = start_time.replace(tzinfo=USER_TIMEZONE)
+    except ValueError:
+        return f"Error: Could not parse start_time '{start_time_str}'. Use ISO format: '2026-02-12T14:00:00'."
+
+    if duration_minutes < 5 or duration_minutes > 480:
+        return "Error: duration_minutes must be between 5 and 480."
+
+    try:
+        result = create_event(
+            summary=title,
+            start_time=start_time,
+            duration_minutes=duration_minutes,
+            description=description,
+            attendee_emails=attendee_emails,
+            add_meet_link=True,
+        )
+    except ValueError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error creating calendar event: {e}"
+
+    lines = [
+        f"Meeting scheduled: {title}",
+        f"Time: {result['start']} - {result['end']} PT",
+        f"Duration: {duration_minutes} minutes",
+    ]
+    if result.get("meet_link"):
+        lines.append(f"Google Meet: {result['meet_link']}")
+    if result.get("html_link"):
+        lines.append(f"Calendar link: {result['html_link']}")
+    if result.get("attendees"):
+        lines.append(f"Invites sent to: {', '.join(result['attendees'])}")
+
+    return "\n".join(lines)
