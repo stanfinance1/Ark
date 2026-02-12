@@ -2,6 +2,12 @@
 Ark - Slack Bot for HNY Plus, Inc.
 Always-on AI operations assistant with tool execution capabilities.
 
+Responds to:
+  - @Ark mentions (app_mention event)
+  - Direct messages
+  - Channel messages that mention "ark" by name
+  - Threads Ark has already participated in
+
 Run with: python bot.py
 """
 
@@ -11,6 +17,7 @@ import sys
 import logging
 import urllib.request
 import time
+from collections import defaultdict
 
 # Add ark directory to path so imports work
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -27,6 +34,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ark")
 
+# ---------------------------------------------------------------------------
+# Ark identity (populated at startup in main())
+# ---------------------------------------------------------------------------
+_ark_user_id = None  # Ark's Slack user ID (e.g. "U08XXXXXXX")
+_ark_bot_id = None   # Ark's Slack bot ID (e.g. "B08XXXXXXX")
+
+# ---------------------------------------------------------------------------
+# Bot-to-bot loop prevention
+# ---------------------------------------------------------------------------
+# Tracks exchanges per (thread, sender_bot_id) to cap runaway loops.
+# Key: "thread_ts:bot_id" -> {"count": int, "last_ts": float}
+_bot_exchange_tracker = defaultdict(lambda: {"count": 0, "last_ts": 0.0})
+BOT_EXCHANGE_LIMIT = 4        # Max back-and-forth exchanges before suppressing
+BOT_COOLDOWN_SECONDS = 300    # Reset counter after 5 minutes of silence
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _clean_mention(text: str) -> str:
     """Remove @Ark mention from message text."""
@@ -74,14 +100,98 @@ def _download_slack_files(files: list) -> list:
     return downloaded
 
 
+def _ark_in_thread(channel: str, thread_ts: str) -> bool:
+    """Check if Ark has previously responded in a thread."""
+    from memory import ConversationMemory
+    mem = ConversationMemory()
+    return mem.has_assistant_messages(channel, thread_ts)
+
+
+def _bot_loop_safe(event: dict) -> bool:
+    """
+    Returns True if it's safe to respond to this bot message.
+    Returns False if we should suppress to prevent a loop.
+    """
+    thread_ts = event.get("thread_ts", event.get("ts", ""))
+    sender_bot_id = event.get("bot_id", "")
+    key = f"{thread_ts}:{sender_bot_id}"
+    now = time.time()
+
+    tracker = _bot_exchange_tracker[key]
+
+    # Reset counter if enough time has passed (conversation cooled down)
+    if now - tracker["last_ts"] > BOT_COOLDOWN_SECONDS:
+        tracker["count"] = 0
+
+    tracker["count"] += 1
+    tracker["last_ts"] = now
+
+    if tracker["count"] > BOT_EXCHANGE_LIMIT:
+        logger.warning(
+            f"Bot loop guard: {tracker['count']} exchanges with bot {sender_bot_id} "
+            f"in thread {thread_ts}. Suppressing response."
+        )
+        return False
+
+    return True
+
+
+def _should_respond(event: dict) -> bool:
+    """
+    Decide whether Ark should respond to a channel message
+    that was NOT an @mention. Returns True if Ark should engage.
+    """
+    # GATE 1: Skip message subtypes (edits, deletes, joins, etc.)
+    if event.get("subtype"):
+        return False
+
+    # GATE 2: Skip our own messages (self-loop prevention)
+    if _ark_bot_id and event.get("bot_id") == _ark_bot_id:
+        return False
+    if _ark_user_id and event.get("user") == _ark_user_id:
+        return False
+
+    # GATE 3: Skip @mentions (app_mention handler already covers those)
+    text = event.get("text") or ""
+    if _ark_user_id and f"<@{_ark_user_id}>" in text:
+        return False
+
+    # CHECK 1: "ark" mentioned by name (case-insensitive, word boundary)
+    if re.search(r"\bark\b", text, re.IGNORECASE):
+        logger.info("Auto-respond: 'ark' mentioned by name")
+        return True
+
+    # CHECK 2: Ark already participating in this thread
+    thread_ts = event.get("thread_ts")
+    if thread_ts and _ark_in_thread(event.get("channel", ""), thread_ts):
+        # For bot senders, apply loop guard
+        if event.get("bot_id"):
+            if not _bot_loop_safe(event):
+                return False
+        logger.info(f"Auto-respond: Ark is participant in thread {thread_ts}")
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Core message handler
+# ---------------------------------------------------------------------------
+
 def _handle_message(event, say, client):
     """Core message handler - processes user message through Claude and responds."""
     from brain import think
 
     text = event.get("text", "")
 
-    # Ignore bot messages (avoid infinite loops)
-    if event.get("bot_id"):
+    # Skip our own messages (belt-and-suspenders with _should_respond)
+    if _ark_bot_id and event.get("bot_id") == _ark_bot_id:
+        return
+    if _ark_user_id and event.get("user") == _ark_user_id:
+        return
+
+    # Skip message subtypes (edits, deletes, etc.)
+    if event.get("subtype"):
         return
 
     # Skip if no text AND no files
@@ -116,13 +226,19 @@ def _handle_message(event, say, client):
     thread_ts = event.get("thread_ts", event["ts"])
     user_id = event.get("user", "unknown")
 
-    # Resolve user's real name from Slack
+    # Resolve sender identity (handles both humans and bots)
     user_name = user_id
-    try:
-        user_info = client.users_info(user=user_id)
-        user_name = user_info["user"]["real_name"]
-    except Exception:
-        pass
+    is_bot_sender = bool(event.get("bot_id"))
+    if is_bot_sender:
+        bot_profile = event.get("bot_profile", {})
+        user_name = bot_profile.get("name") or event.get("username") or user_id
+        user_name = f"[BOT] {user_name}"
+    else:
+        try:
+            user_info = client.users_info(user=user_id)
+            user_name = user_info["user"]["real_name"]
+        except Exception:
+            pass
 
     logger.info(f"Message from {user_name} in {channel}: {clean_text[:100]}...")
 
@@ -176,9 +292,15 @@ def _handle_message(event, say, client):
         )
 
 
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
 def main():
     from slack_bolt import App
     from slack_bolt.adapter.socket_mode import SocketModeHandler
+
+    global _ark_user_id, _ark_bot_id
 
     logger.info("Starting Ark...")
 
@@ -187,17 +309,33 @@ def main():
         signing_secret=os.environ["SLACK_SIGNING_SECRET"].strip(),
     )
 
+    # Cache Ark's own identity for self-detection and loop prevention
+    try:
+        auth = app.client.auth_test()
+        _ark_user_id = auth["user_id"]
+        _ark_bot_id = auth.get("bot_id")
+        logger.info(f"Ark identity: user_id={_ark_user_id}, bot_id={_ark_bot_id}")
+    except Exception as e:
+        logger.error(f"Failed to get Ark identity: {e}")
+        raise  # Cannot safely run without self-identification
+
     @app.event("app_mention")
     def handle_mention(event, say, client):
         _handle_message(event, say, client)
 
     @app.event("message")
-    def handle_dm(event, say, client):
+    def handle_message(event, say, client):
+        # DMs - always respond
         if event.get("channel_type") == "im":
+            _handle_message(event, say, client)
+            return
+
+        # Channel messages - respond if Ark should engage
+        if _should_respond(event):
             _handle_message(event, say, client)
 
     handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"].strip())
-    logger.info("Ark is online. Listening for messages.")
+    logger.info("Ark is online. Listening for messages and auto-responding when relevant.")
     handler.start()
 
 

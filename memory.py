@@ -66,6 +66,15 @@ class ConversationMemory:
 
         return messages
 
+    def has_assistant_messages(self, channel: str, thread_ts: str) -> bool:
+        """Check if Ark has responded in a thread (fast existence check)."""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM messages WHERE channel = ? AND thread_ts = ? AND role = 'assistant' LIMIT 1",
+                (channel, thread_ts),
+            ).fetchone()
+        return row is not None
+
     def clear_thread(self, channel: str, thread_ts: str):
         """Clear conversation history for a thread."""
         with sqlite3.connect(self.db_path) as conn:
