@@ -249,6 +249,65 @@ TOOL_DEFINITIONS = [
             "required": ["title", "start_time"],
         },
     },
+    # --- Bot Registry Tools ---
+    {
+        "name": "bot_lookup",
+        "description": "Look up a bot's full intelligence profile from the registry. Returns their personality, skills, loyalty, trust level, capabilities, and interaction history. Use this before collaborating with or delegating to another bot.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Three-letter bot name (e.g. 'BOB', 'MAX', 'ZEN'). Case-insensitive.",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "bot_update",
+        "description": "Update a bot's profile in the registry. Creates a new entry if the bot doesn't exist yet. Use this AFTER EVERY interaction with another bot to keep intelligence current. You can update any field: personality, skills, trust_level, loyalty, notes, etc. To log an interaction, include an 'interaction' object with 'context', 'summary', and 'assessment' fields.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Three-letter bot name (e.g. 'BOB'). Case-insensitive.",
+                },
+                "updates": {
+                    "type": "object",
+                    "description": "Fields to update. Top-level: full_name, platform, owner, loyalty, trust_level (unknown/observed/tested/trusted/ally/untrusted), status (active/inactive), notes. Nested: personality {tone, traits, quirks}, skills {primary, tools, specialties}, capabilities {can_execute_code, can_access_web, ...}, collaboration {can_receive_tasks, can_delegate_tasks, preferred_communication, max_complexity}. Special: interaction {context, summary, assessment} - appended to history.",
+                },
+            },
+            "required": ["name", "updates"],
+        },
+    },
+    {
+        "name": "bot_list",
+        "description": "List all known bots in the registry. Optionally filter by skill, trust level, loyalty, or status. Use this to find which bots are available for a task or to review the full roster.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filter": {
+                    "type": "string",
+                    "description": "Optional filter term to match against skills, trust level, loyalty, or status (e.g. 'trusted', 'data analysis', 'active').",
+                },
+            },
+        },
+    },
+    {
+        "name": "bot_roster",
+        "description": "Get a roster of bots available for collaboration on a specific task. Returns only active bots that can receive tasks, sorted by trust level (highest first). Optionally filter by a skill needed.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "skill_needed": {
+                    "type": "string",
+                    "description": "Optional skill to filter by (e.g. 'web scraping', 'data analysis', 'copywriting').",
+                },
+            },
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -353,6 +412,18 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
                 inputs.get("attendee_emails", []),
                 slack_context,
             )
+        elif name == "bot_lookup":
+            from bot_registry import lookup_bot
+            return lookup_bot(inputs.get("name", ""))
+        elif name == "bot_update":
+            from bot_registry import update_bot
+            return update_bot(inputs.get("name", ""), inputs.get("updates", {}))
+        elif name == "bot_list":
+            from bot_registry import list_bots
+            return list_bots(inputs.get("filter"))
+        elif name == "bot_roster":
+            from bot_registry import get_collaboration_roster
+            return get_collaboration_roster(inputs.get("skill_needed"))
         else:
             return f"Error: Unknown tool '{name}'"
     except Exception as e:
