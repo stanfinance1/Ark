@@ -308,6 +308,14 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "name": "discover_bots",
+        "description": "Refresh the workspace bot cache from Slack and sync any new bots into the registry. Use this to discover new bots that have been added to the workspace since last startup, or to get a fresh count of all known bots.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -424,6 +432,15 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
         elif name == "bot_roster":
             from bot_registry import get_collaboration_roster
             return get_collaboration_roster(inputs.get("skill_needed"))
+        elif name == "discover_bots":
+            from slack_users import get_workspace_bots
+            from bot_registry import sync_from_slack
+            client = slack_context.get("client") if slack_context else None
+            if not client:
+                return "Error: No Slack client available for bot discovery."
+            workspace_bots = get_workspace_bots(client)
+            result = sync_from_slack(workspace_bots)
+            return result
         else:
             return f"Error: Unknown tool '{name}'"
     except Exception as e:

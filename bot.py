@@ -229,10 +229,45 @@ def _handle_message(event, say, client):
     # Resolve sender identity (handles both humans and bots)
     user_name = user_id
     is_bot_sender = bool(event.get("bot_id"))
+
+    # Fallback bot detection: check subtype or user cache
+    if not is_bot_sender:
+        if event.get("subtype") == "bot_message":
+            is_bot_sender = True
+        else:
+            try:
+                from slack_users import is_bot_user
+                if is_bot_user(client, user_id):
+                    is_bot_sender = True
+            except Exception:
+                pass
+
     if is_bot_sender:
         bot_profile = event.get("bot_profile", {})
         user_name = bot_profile.get("name") or event.get("username") or user_id
         user_name = f"[BOT] {user_name}"
+
+        # Auto-register bot in registry on first encounter
+        try:
+            from bot_registry import update_bot, _load
+            registry = _load()
+            bot_display = bot_profile.get("name") or event.get("username") or "UNKNOWN"
+            key = bot_display.upper().replace(" ", "_")[:20]
+            if key not in registry and key != "ARK":
+                update_bot(key, {
+                    "full_name": bot_display,
+                    "platform": "slack",
+                    "status": "active",
+                    "notes": f"Auto-registered on first message. bot_id: {event.get('bot_id', 'N/A')}",
+                    "interaction": {
+                        "context": f"channel {channel}",
+                        "summary": "First message detected - auto-registered",
+                        "assessment": "New bot, needs observation",
+                    },
+                })
+                logger.info(f"Auto-registered new bot: {key}")
+        except Exception as e:
+            logger.warning(f"Failed to auto-register bot: {e}")
     else:
         try:
             user_info = client.users_info(user=user_id)
@@ -318,6 +353,16 @@ def main():
     except Exception as e:
         logger.error(f"Failed to get Ark identity: {e}")
         raise  # Cannot safely run without self-identification
+
+    # Auto-discover workspace bots and sync to registry
+    try:
+        from slack_users import get_workspace_bots
+        from bot_registry import sync_from_slack
+        workspace_bots = get_workspace_bots(app.client)
+        result = sync_from_slack(workspace_bots, ark_user_id=_ark_user_id)
+        logger.info(f"Bot registry sync: {result}")
+    except Exception as e:
+        logger.warning(f"Bot registry sync failed (non-fatal): {e}")
 
     @app.event("app_mention")
     def handle_mention(event, say, client):

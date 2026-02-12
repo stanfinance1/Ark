@@ -264,6 +264,72 @@ def log_interaction(name: str, context: str, summary: str, assessment: str = "")
     })
 
 
+def sync_from_slack(bot_list: list, ark_user_id: str = None) -> str:
+    """
+    Sync workspace bots from Slack into the registry.
+    Creates entries for bots not already registered.
+    Skips Ark itself and Slackbot.
+
+    bot_list: list of dicts from slack_users.get_workspace_bots()
+              Each has: id, name, real_name, display_name, app_id, is_bot
+    ark_user_id: Ark's own Slack user ID to skip self-registration.
+    Returns summary string.
+    """
+    registry = _load()
+    added = 0
+    skipped = 0
+
+    for bot in bot_list:
+        bot_id = bot.get("id", "")
+        name = bot.get("name", "").strip() or bot.get("real_name", "").strip()
+
+        # Skip Ark itself, Slackbot, and unnamed bots
+        if bot_id == ark_user_id:
+            continue
+        if not name or name.lower() == "slackbot":
+            continue
+
+        # Use uppercase short name as registry key (consistent with existing pattern)
+        key = name.upper().replace(" ", "_")[:20]
+
+        if key in registry:
+            skipped += 1
+            continue
+
+        # Create a basic profile
+        registry[key] = {
+            "name": key,
+            "full_name": name,
+            "platform": "slack",
+            "owner": "unknown",
+            "loyalty": "unknown",
+            "personality": {"tone": "", "traits": [], "quirks": []},
+            "skills": {"primary": [], "tools": [], "specialties": []},
+            "capabilities": {},
+            "trust_level": "unknown",
+            "collaboration": {
+                "can_receive_tasks": False,
+                "can_delegate_tasks": False,
+                "preferred_communication": "slack_mention",
+                "max_complexity": "unknown",
+            },
+            "interactions": [],
+            "notes": f"Auto-discovered from Slack workspace. Slack user ID: {bot_id}",
+            "first_seen": _now(),
+            "last_seen": _now(),
+            "status": "active",
+            "slack_user_id": bot_id,
+            "slack_app_id": bot.get("app_id", ""),
+        }
+        added += 1
+
+    if added > 0:
+        _save(registry)
+
+    total = len([v for v in registry.values() if v.get("status") == "active"])
+    return f"Synced workspace bots: {added} new, {skipped} already known. Registry total: {total} active bots."
+
+
 def get_collaboration_roster(skill_needed: str = None) -> str:
     """
     Get a roster of bots available for collaboration on a task.
