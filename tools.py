@@ -316,6 +316,88 @@ TOOL_DEFINITIONS = [
             "properties": {},
         },
     },
+    # --- Conversation Intelligence Tools ---
+    {
+        "name": "analyze_conversation",
+        "description": "Analyze the current conversation thread to extract insights, decisions, action items, and determine if a meeting is needed. Use this proactively after 10+ messages, when the conversation seems stuck, when multiple decisions have been discussed, or when explicitly asked for a summary. Returns conversation health status, key points, action items, participants, and meeting recommendations.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "include_history": {
+                    "type": "boolean",
+                    "description": "Whether to include full conversation history in the analysis. Defaults to False (uses only recent context).",
+                    "default": False,
+                },
+            },
+        },
+    },
+    {
+        "name": "send_summary_to_stan",
+        "description": "Send a conversation summary, action items, or insights directly to Stan via DM. Use this when: (1) a conversation reaches a natural conclusion, (2) action items need Stan's attention, (3) a meeting is recommended, (4) you notice something Stan should know about, or (5) you're explicitly asked to update Stan. The summary will be formatted with a link back to the original thread.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "Brief summary of the conversation (1-3 sentences).",
+                },
+                "key_points": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of key decisions or discussion points.",
+                },
+                "action_items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of action items identified (format: 'Task - Owner - Deadline' or just 'Task').",
+                },
+                "recommendations": {
+                    "type": "string",
+                    "description": "Optional recommendations or next steps for Stan.",
+                },
+                "urgency": {
+                    "type": "string",
+                    "description": "Urgency level: 'low', 'medium', 'high', or 'critical'. Defaults to 'medium'.",
+                    "default": "medium",
+                },
+            },
+            "required": ["summary"],
+        },
+    },
+    {
+        "name": "suggest_meeting_with_context",
+        "description": "Intelligently suggest a meeting based on conversation analysis. Use this when: (1) 3+ back-and-forth exchanges without resolution, (2) multiple people need to align, (3) discussion is going in circles, (4) technical complexity requires real-time discussion, or (5) deadlines are approaching. Explains why a meeting is needed, proposes attendees and agenda. Can optionally schedule immediately if user approves.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Why a meeting would be helpful (e.g., 'Multiple unresolved questions after 5 exchanges', 'Technical details too complex for async').",
+                },
+                "proposed_attendees": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of suggested attendees (names, not emails).",
+                },
+                "proposed_agenda": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of topics/agenda items to cover.",
+                },
+                "suggested_duration": {
+                    "type": "integer",
+                    "description": "Suggested meeting duration in minutes. Defaults to 30.",
+                    "default": 30,
+                },
+                "schedule_immediately": {
+                    "type": "boolean",
+                    "description": "Set to true to schedule the meeting right away (requires Stan's approval in conversation). Defaults to false (just suggests).",
+                    "default": False,
+                },
+            },
+            "required": ["reason", "proposed_attendees", "proposed_agenda"],
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -441,6 +523,26 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
             workspace_bots = get_workspace_bots(client)
             result = sync_from_slack(workspace_bots)
             return result
+        elif name == "analyze_conversation":
+            return _analyze_conversation(inputs.get("include_history", False), slack_context)
+        elif name == "send_summary_to_stan":
+            return _send_summary_to_stan(
+                inputs.get("summary", ""),
+                inputs.get("key_points", []),
+                inputs.get("action_items", []),
+                inputs.get("recommendations", ""),
+                inputs.get("urgency", "medium"),
+                slack_context,
+            )
+        elif name == "suggest_meeting_with_context":
+            return _suggest_meeting_with_context(
+                inputs.get("reason", ""),
+                inputs.get("proposed_attendees", []),
+                inputs.get("proposed_agenda", []),
+                inputs.get("suggested_duration", 30),
+                inputs.get("schedule_immediately", False),
+                slack_context,
+            )
         else:
             return f"Error: Unknown tool '{name}'"
     except Exception as e:
@@ -838,5 +940,243 @@ def _schedule_meeting(title, start_time_str, duration_minutes, description, atte
         lines.append(f"Calendar link: {result['html_link']}")
     if result.get("attendees"):
         lines.append(f"Invites sent to: {', '.join(result['attendees'])}")
+
+    return "\n".join(lines)
+
+
+def _analyze_conversation(include_history: bool, slack_context: dict) -> str:
+    """Analyze the current conversation thread for insights, action items, and meeting recommendations."""
+    from memory import get_history
+    from slack_users import lookup_user_by_id
+
+    if not slack_context:
+        return "Error: No Slack context available for conversation analysis."
+
+    channel = slack_context.get("channel")
+    thread_ts = slack_context.get("thread_ts")
+    client = slack_context.get("client")
+
+    if not channel:
+        return "Error: No channel information available."
+
+    # Get conversation history from memory
+    messages = get_history(channel, thread_ts)
+
+    if not messages:
+        return "No conversation history available to analyze."
+
+    # Count messages and participants
+    message_count = len(messages)
+    user_messages = [m for m in messages if m.get("role") == "user"]
+    assistant_messages = [m for m in messages if m.get("role") == "assistant"]
+
+    # Extract unique participants from user content (format: "[From: Name (UserID)]")
+    participants = set()
+    for msg in user_messages:
+        content = msg.get("content", "")
+        if isinstance(content, str) and content.startswith("[From: "):
+            # Extract name from "[From: Name (UserID)]"
+            try:
+                name_part = content.split("]")[0].replace("[From: ", "")
+                name = name_part.split("(")[0].strip()
+                participants.add(name)
+            except:
+                pass
+
+    # Determine conversation health
+    if message_count >= 15:
+        if len(assistant_messages) >= 6:
+            health = "complex_discussion"
+            concerns = ["Long conversation with multiple exchanges - may benefit from real-time discussion"]
+        else:
+            health = "productive"
+            concerns = []
+    elif message_count >= 10:
+        health = "active"
+        concerns = []
+    else:
+        health = "early_stage"
+        concerns = []
+
+    # Check for circular patterns (multiple assistant responses without resolution)
+    if len(assistant_messages) >= 4:
+        concerns.append("Multiple back-and-forth exchanges - verify if progress is being made")
+
+    # Meeting recommendation logic
+    meeting_needed = False
+    meeting_reason = ""
+
+    if message_count >= 12 and len(assistant_messages) >= 5:
+        meeting_needed = True
+        meeting_reason = f"Extended discussion ({message_count} messages, {len(assistant_messages)} exchanges) may be more efficient as a real-time meeting"
+    elif len(participants) >= 3:
+        meeting_needed = True
+        meeting_reason = f"Multiple participants ({len(participants)} people) discussing - alignment may be easier in a meeting"
+
+    # Build analysis response
+    analysis_parts = [
+        "## Conversation Analysis",
+        f"\n**Messages:** {message_count} ({len(user_messages)} user, {len(assistant_messages)} assistant)",
+        f"**Participants:** {', '.join(sorted(participants)) if participants else 'Unknown'}",
+        f"**Status:** {health.replace('_', ' ').title()}",
+    ]
+
+    if concerns:
+        analysis_parts.append(f"\n**Concerns:**")
+        for concern in concerns:
+            analysis_parts.append(f"- {concern}")
+
+    analysis_parts.append(f"\n**Meeting Recommendation:** {'Yes - ' + meeting_reason if meeting_needed else 'Not needed at this time'}")
+
+    if include_history:
+        analysis_parts.append("\n**Recent Context:**")
+        # Show last 5 exchanges
+        recent = messages[-10:]
+        for msg in recent:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                # Truncate long messages
+                preview = content[:150] + "..." if len(content) > 150 else content
+                analysis_parts.append(f"- [{role.upper()}] {preview}")
+
+    analysis_parts.append("\n**Next Steps:**")
+    if meeting_needed:
+        analysis_parts.append("- Use suggest_meeting_with_context to propose a meeting")
+        analysis_parts.append("- Or use send_summary_to_stan to notify Stan of conversation status")
+    else:
+        analysis_parts.append("- Continue discussion as needed")
+        analysis_parts.append("- Use send_summary_to_stan if action items need Stan's attention")
+
+    return "\n".join(analysis_parts)
+
+
+def _send_summary_to_stan(summary: str, key_points: list, action_items: list, recommendations: str, urgency: str, slack_context: dict) -> str:
+    """Send a conversation summary to Stan via DM."""
+    STAN_USER_ID = "U086HEJAUTH"
+
+    if not summary:
+        return "Error: Summary is required."
+
+    if not slack_context:
+        return "Error: No Slack context available."
+
+    client = slack_context.get("client")
+    channel = slack_context.get("channel")
+    thread_ts = slack_context.get("thread_ts")
+    user_name = slack_context.get("user_name", "Unknown")
+
+    if not client:
+        return "Error: No Slack client available."
+
+    # Build the summary message
+    urgency_emoji = {
+        "low": "ℹ️",
+        "medium": "📊",
+        "high": "⚠️",
+        "critical": "🚨",
+    }
+
+    emoji = urgency_emoji.get(urgency, "📊")
+
+    message_parts = [
+        f"{emoji} *Conversation Summary* ({urgency.upper()} priority)",
+        f"\n**Conversation with:** {user_name}",
+    ]
+
+    # Add thread link if available
+    if channel and thread_ts:
+        # Get channel info to build permalink
+        try:
+            # For thread link, use the format: slack://channel?team=TEAM&id=CHANNEL&message=THREAD
+            # Or better: web link
+            workspace_info = client.team_info()
+            team_id = workspace_info.get("team", {}).get("id", "")
+            thread_link = f"https://app.slack.com/client/{team_id}/{channel}/thread/{channel}-{thread_ts}"
+            message_parts.append(f"**Thread:** <{thread_link}|View conversation>")
+        except:
+            message_parts.append(f"**Location:** <#{channel}>")
+    elif channel:
+        message_parts.append(f"**Location:** <#{channel}>")
+
+    message_parts.append(f"\n**Summary:**\n{summary}")
+
+    if key_points:
+        message_parts.append("\n**Key Points:**")
+        for point in key_points:
+            message_parts.append(f"• {point}")
+
+    if action_items:
+        message_parts.append("\n**Action Items:**")
+        for item in action_items:
+            message_parts.append(f"☐ {item}")
+
+    if recommendations:
+        message_parts.append(f"\n**Recommendations:**\n{recommendations}")
+
+    message_parts.append(f"\n_Generated by Ark on {slack_context.get('timestamp', 'unknown time')}_")
+
+    message_text = "\n".join(message_parts)
+
+    # Send DM to Stan
+    try:
+        client.chat_postMessage(
+            channel=STAN_USER_ID,
+            text=message_text,
+            mrkdwn=True,
+        )
+        return f"Summary sent to Stan via DM. Urgency: {urgency}"
+    except Exception as e:
+        return f"Error sending summary to Stan: {e}"
+
+
+def _suggest_meeting_with_context(reason: str, proposed_attendees: list, proposed_agenda: list, suggested_duration: int, schedule_immediately: bool, slack_context: dict) -> str:
+    """Suggest a meeting based on conversation analysis."""
+    if not reason or not proposed_attendees or not proposed_agenda:
+        return "Error: reason, proposed_attendees, and proposed_agenda are all required."
+
+    if not slack_context:
+        return "Error: No Slack context available."
+
+    # Build the suggestion message
+    lines = [
+        "## Meeting Recommendation",
+        f"\n**Why:** {reason}",
+        f"\n**Suggested Attendees:**",
+    ]
+
+    for attendee in proposed_attendees:
+        lines.append(f"- {attendee}")
+
+    lines.append("\n**Proposed Agenda:**")
+    for i, item in enumerate(proposed_agenda, 1):
+        lines.append(f"{i}. {item}")
+
+    lines.append(f"\n**Suggested Duration:** {suggested_duration} minutes")
+
+    if schedule_immediately:
+        # Check if user is Stan (only Stan can schedule)
+        if slack_context.get("user_id") == "U086HEJAUTH":
+            lines.append("\n**Ready to Schedule:** Yes - I can schedule this meeting now if you provide:")
+            lines.append("1. Preferred date/time (e.g., 'tomorrow at 2pm')")
+            lines.append("2. Email addresses for attendees (I'll look them up via Slack if you provide names)")
+            lines.append("\nJust confirm and I'll create the calendar invite with Google Meet link.")
+        else:
+            lines.append("\n**Note:** Only Stan can schedule meetings directly. I'll notify Stan of this recommendation.")
+            # Auto-send summary to Stan
+            summary = f"Meeting recommended for conversation with {slack_context.get('user_name', 'team member')}"
+            _send_summary_to_stan(
+                summary=summary,
+                key_points=[reason],
+                action_items=[f"Schedule meeting: {suggested_duration}min with {', '.join(proposed_attendees)}"],
+                recommendations=f"Agenda: {', '.join(proposed_agenda)}",
+                urgency="medium",
+                slack_context=slack_context,
+            )
+            lines.append("Summary sent to Stan.")
+    else:
+        lines.append("\n**Next Steps:**")
+        lines.append("- Let me know if you'd like me to schedule this meeting")
+        lines.append("- Or feel free to schedule it yourself and I can help with the invite details")
 
     return "\n".join(lines)

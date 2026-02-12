@@ -282,6 +282,9 @@ def _handle_message(event, say, client):
         "client": client,
         "channel": channel,
         "thread_ts": thread_ts,
+        "user_id": user_id,
+        "user_name": user_name,
+        "timestamp": event["ts"],
     }
 
     try:
