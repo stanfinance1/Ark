@@ -398,6 +398,49 @@ TOOL_DEFINITIONS = [
             "required": ["reason", "proposed_attendees", "proposed_agenda"],
         },
     },
+    # --- Business Intelligence Tools ---
+    {
+        "name": "get_shopify_metrics",
+        "description": "Get real-time Shopify sales and order metrics. Fetch sales data for today, yesterday, this week, this month, or custom date ranges. Returns net sales, gross sales, order count, average order value, and more. Use this when asked about 'sales today', 'revenue this month', 'how many orders', etc.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "timeframe": {
+                    "type": "string",
+                    "description": "Time period to query: 'today', 'yesterday', 'this_week', 'last_week', 'this_month', 'last_month', 'last_7_days', 'last_30_days'. Defaults to 'today'.",
+                    "default": "today",
+                },
+            },
+        },
+    },
+    {
+        "name": "get_meta_ads_performance",
+        "description": "Get Meta Ads (Facebook/Instagram) campaign performance metrics. Returns spend, impressions, clicks, conversions, CPA (cost per acquisition), and performance vs targets. Use this when asked about 'ad spend', 'CPA', 'how are ads performing', 'meta ads', etc.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "timeframe": {
+                    "type": "string",
+                    "description": "Time period to query: 'today', 'yesterday', 'last_7d', 'last_14d', 'last_30d', 'this_month', 'last_month'. Defaults to 'last_7d'.",
+                    "default": "last_7d",
+                },
+            },
+        },
+    },
+    {
+        "name": "get_skio_health",
+        "description": "Get subscription health metrics from SKIO. Returns active/cancelled/paused subscriber counts, retention rates, average cycles before cancel, churn risk analysis, and top cancellation reasons. Use this when asked about 'subscriber count', 'retention', 'churn', 'cancellations', 'subscription health', etc.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "include_churn_risk": {
+                    "type": "boolean",
+                    "description": "Include list of high-risk subscribers (churn score > 0.7). Defaults to False.",
+                    "default": False,
+                },
+            },
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -543,6 +586,12 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
                 inputs.get("schedule_immediately", False),
                 slack_context,
             )
+        elif name == "get_shopify_metrics":
+            return _get_shopify_metrics(inputs.get("timeframe", "today"))
+        elif name == "get_meta_ads_performance":
+            return _get_meta_ads_performance(inputs.get("timeframe", "last_7d"))
+        elif name == "get_skio_health":
+            return _get_skio_health(inputs.get("include_churn_risk", False))
         else:
             return f"Error: Unknown tool '{name}'"
     except Exception as e:
@@ -1180,3 +1229,357 @@ def _suggest_meeting_with_context(reason: str, proposed_attendees: list, propose
         lines.append("- Or feel free to schedule it yourself and I can help with the invite details")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Business Intelligence Tools
+# ---------------------------------------------------------------------------
+
+def _get_shopify_metrics(timeframe: str = "today") -> str:
+    """Fetch Shopify sales metrics for a given timeframe."""
+    try:
+        # Load environment variables
+        from dotenv import load_dotenv
+        from pathlib import Path
+        env_path = Path(BASE_DIR).parent / '.env'
+        if not env_path.exists():
+            env_path = Path(BASE_DIR) / '.env'
+        load_dotenv(env_path)
+
+        CLIENT_ID = os.getenv('SHOPIFY_CLIENT_ID')
+        CLIENT_SECRET = os.getenv('SHOPIFY_CLIENT_SECRET')
+        STORE = os.getenv('SHOPIFY_STORE')
+
+        if not all([CLIENT_ID, CLIENT_SECRET, STORE]):
+            return "Error: Shopify credentials not configured. Missing SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET, or SHOPIFY_STORE in environment."
+
+        # Get access token (using client credentials flow)
+        token_url = f"https://{STORE}/admin/oauth/access_token"
+        token_payload = {
+            'client_id': CLIENT_ID,
+            'client_secret': CLIENT_SECRET,
+            'grant_type': 'client_credentials'
+        }
+
+        token_response = requests.post(token_url, data=token_payload)
+        token_response.raise_for_status()
+        access_token = token_response.json()['access_token']
+
+        # Calculate date range
+        from datetime import datetime, timedelta
+        now = datetime.now()
+
+        date_ranges = {
+            'today': (now.replace(hour=0, minute=0, second=0), now),
+            'yesterday': (
+                (now - timedelta(days=1)).replace(hour=0, minute=0, second=0),
+                now.replace(hour=0, minute=0, second=0)
+            ),
+            'this_week': (now - timedelta(days=now.weekday()), now),
+            'last_week': (
+                now - timedelta(days=now.weekday() + 7),
+                now - timedelta(days=now.weekday())
+            ),
+            'this_month': (now.replace(day=1, hour=0, minute=0, second=0), now),
+            'last_month': (
+                (now.replace(day=1) - timedelta(days=1)).replace(day=1, hour=0, minute=0, second=0),
+                now.replace(day=1, hour=0, minute=0, second=0)
+            ),
+            'last_7_days': (now - timedelta(days=7), now),
+            'last_30_days': (now - timedelta(days=30), now),
+        }
+
+        start_date, end_date = date_ranges.get(timeframe, date_ranges['today'])
+
+        # Fetch orders from Shopify
+        headers = {'X-Shopify-Access-Token': access_token}
+        url = f"https://{STORE}/admin/api/2024-01/orders.json"
+        params = {
+            'status': 'any',
+            'created_at_min': start_date.isoformat(),
+            'created_at_max': end_date.isoformat(),
+            'limit': 250
+        }
+
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        orders = response.json().get('orders', [])
+
+        # Calculate metrics
+        total_orders = len(orders)
+        gross_sales = sum(float(o.get('total_line_items_price', 0)) for o in orders)
+        discounts = sum(float(o.get('total_discounts', 0)) for o in orders)
+        returns = sum(float(o.get('total_price', 0)) for o in orders if o.get('cancelled_at'))
+        net_sales = gross_sales - discounts - returns
+        shipping = sum(float(o.get('total_shipping_price_set', {}).get('shop_money', {}).get('amount', 0)) for o in orders)
+        taxes = sum(float(o.get('total_tax', 0)) for o in orders)
+        total_sales = net_sales + shipping + taxes
+        aov = net_sales / total_orders if total_orders > 0 else 0
+
+        # Format output
+        lines = []
+        lines.append(f"=== SHOPIFY METRICS ({timeframe.upper()}) ===")
+        lines.append(f"Period: {start_date.strftime('%Y-%m-%d %H:%M')} to {end_date.strftime('%Y-%m-%d %H:%M')}")
+        lines.append("")
+        lines.append(f"Orders:        {total_orders:,}")
+        lines.append(f"Gross Sales:   ${gross_sales:,.2f}")
+        lines.append(f"Discounts:    -${discounts:,.2f}")
+        lines.append(f"Returns:      -${returns:,.2f}")
+        lines.append(f"Net Sales:     ${net_sales:,.2f}")
+        lines.append(f"Shipping:     +${shipping:,.2f}")
+        lines.append(f"Taxes:        +${taxes:,.2f}")
+        lines.append(f"Total Sales:   ${total_sales:,.2f}")
+        lines.append(f"AOV (Avg):     ${aov:,.2f}")
+
+        return "\n".join(lines)
+
+    except requests.exceptions.RequestException as e:
+        return f"Error fetching Shopify data: {e}"
+    except Exception as e:
+        return f"Error in Shopify metrics: {e}"
+
+
+def _get_meta_ads_performance(timeframe: str = "last_7d") -> str:
+    """Fetch Meta Ads performance metrics."""
+    try:
+        # Load environment variables
+        from dotenv import load_dotenv
+        from pathlib import Path
+        env_path = Path(BASE_DIR).parent / '.env'
+        if not env_path.exists():
+            env_path = Path(BASE_DIR) / '.env'
+        load_dotenv(env_path)
+
+        ACCESS_TOKEN = os.getenv('META_ACCESS_TOKEN')
+        AD_ACCOUNT_ID = os.getenv('META_AD_ACCOUNT_ID')
+
+        if not all([ACCESS_TOKEN, AD_ACCOUNT_ID]):
+            return "Error: Meta Ads credentials not configured. Missing META_ACCESS_TOKEN or META_AD_ACCOUNT_ID in environment."
+
+        TARGET_CAC = 45.00
+        WARNING_CAC = 55.00
+
+        # Fetch account-level insights
+        url = f"https://graph.facebook.com/v21.0/{AD_ACCOUNT_ID}/insights"
+        params = {
+            'access_token': ACCESS_TOKEN,
+            'date_preset': timeframe,
+            'fields': 'spend,impressions,clicks,actions,cpc,cpm,ctr,reach'
+        }
+
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json().get('data', [])
+
+        if not data:
+            return f"No Meta Ads data available for {timeframe}"
+
+        insights = data[0]
+
+        # Extract metrics
+        spend = float(insights.get('spend', 0))
+        impressions = int(insights.get('impressions', 0))
+        clicks = int(insights.get('clicks', 0))
+        ctr = float(insights.get('ctr', 0))
+        cpc = float(insights.get('cpc', 0))
+        cpm = float(insights.get('cpm', 0))
+
+        # Extract conversions
+        conversions = 0
+        actions = insights.get('actions', [])
+        conversion_types = ['omni_purchase', 'purchase', 'lead', 'complete_registration', 'add_to_cart']
+        for action in actions:
+            if action.get('action_type') in conversion_types:
+                conversions = int(action.get('value', 0))
+                break
+
+        # Calculate CPA
+        cpa = spend / conversions if conversions > 0 else None
+
+        # Format output
+        lines = []
+        lines.append(f"=== META ADS PERFORMANCE ({timeframe.upper()}) ===")
+        lines.append(f"Account: {AD_ACCOUNT_ID}")
+        lines.append("")
+        lines.append(f"Spend:         ${spend:,.2f}")
+        lines.append(f"Impressions:   {impressions:,}")
+        lines.append(f"Clicks:        {clicks:,}")
+        lines.append(f"CTR:           {ctr:.2f}%")
+        lines.append(f"CPC:           ${cpc:,.2f}")
+        lines.append(f"CPM:           ${cpm:,.2f}")
+        lines.append(f"Conversions:   {conversions:,}")
+
+        if cpa is not None:
+            lines.append(f"CPA:           ${cpa:,.2f}")
+
+            # Performance indicator
+            if cpa > WARNING_CAC:
+                delta = cpa - WARNING_CAC
+                lines.append(f"Status:        🔴 HIGH - ${delta:.2f} above warning threshold (${WARNING_CAC})")
+            elif cpa > TARGET_CAC:
+                delta = cpa - TARGET_CAC
+                lines.append(f"Status:        ⚠️  WARNING - ${delta:.2f} above target (${TARGET_CAC})")
+            else:
+                delta = TARGET_CAC - cpa
+                lines.append(f"Status:        ✅ GOOD - ${delta:.2f} below target (${TARGET_CAC})")
+        else:
+            lines.append(f"CPA:           N/A (no conversions)")
+
+        lines.append("")
+        lines.append(f"Target CPA:    ${TARGET_CAC:.2f}")
+        lines.append(f"Warning Level: ${WARNING_CAC:.2f}")
+
+        return "\n".join(lines)
+
+    except requests.exceptions.RequestException as e:
+        return f"Error fetching Meta Ads data: {e}"
+    except Exception as e:
+        return f"Error in Meta Ads metrics: {e}"
+
+
+def _get_skio_health(include_churn_risk: bool = False) -> str:
+    """Fetch SKIO subscription health metrics."""
+    try:
+        # Load environment variables
+        from dotenv import load_dotenv
+        from pathlib import Path
+        env_path = Path(BASE_DIR).parent / '.env'
+        if not env_path.exists():
+            env_path = Path(BASE_DIR) / '.env'
+        load_dotenv(env_path)
+
+        API_KEY = os.getenv('SKIO_API_KEY')
+
+        if not API_KEY:
+            return "Error: SKIO API key not configured. Missing SKIO_API_KEY in environment."
+
+        GRAPHQL_URL = "https://graphql.skio.com/v1/graphql"
+        headers = {
+            "authorization": f"API {API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        # Fetch subscription summary
+        query = """
+        {
+          active: Subscriptions(where: {status: {_eq: "ACTIVE"}}) {
+            id
+            cyclesCompleted
+            churnScore
+          }
+          cancelled: Subscriptions(where: {status: {_eq: "CANCELLED"}}) {
+            id
+            cyclesCompleted
+          }
+          paused: Subscriptions(where: {status: {_eq: "PAUSED"}}) {
+            id
+          }
+        }
+        """
+
+        response = requests.post(GRAPHQL_URL, json={'query': query}, headers=headers)
+        response.raise_for_status()
+        data = response.json().get('data', {})
+
+        active = len(data.get('active', []))
+        cancelled = len(data.get('cancelled', []))
+        paused = len(data.get('paused', []))
+        total = active + cancelled + paused
+
+        # Calculate metrics
+        churn_rate = (cancelled / total * 100) if total > 0 else 0
+
+        # Active sub metrics
+        avg_cycles = 0
+        avg_churn_score = 0
+        high_risk = 0
+
+        if data.get('active'):
+            active_subs = data['active']
+            avg_cycles = sum(s['cyclesCompleted'] for s in active_subs) / len(active_subs)
+
+            scores = [float(s['churnScore']) for s in active_subs if s.get('churnScore') is not None]
+            if scores:
+                avg_churn_score = sum(scores) / len(scores)
+                high_risk = sum(1 for s in scores if s > 0.7)
+
+        # Cancelled sub metrics
+        avg_cycles_cancel = 0
+        if data.get('cancelled'):
+            cancelled_subs = data['cancelled']
+            avg_cycles_cancel = sum(s['cyclesCompleted'] for s in cancelled_subs) / len(cancelled_subs)
+
+        # Format output
+        lines = []
+        lines.append("=== SKIO SUBSCRIPTION HEALTH ===")
+        lines.append("")
+        lines.append("Subscription Status:")
+        lines.append(f"  Active:      {active:,}")
+        lines.append(f"  Cancelled:   {cancelled:,}")
+        lines.append(f"  Paused:      {paused:,}")
+        lines.append(f"  Total:       {total:,}")
+        lines.append("")
+        lines.append(f"Lifetime Churn Rate: {churn_rate:.1f}%")
+        lines.append("")
+
+        if data.get('active'):
+            lines.append("Active Subscriptions:")
+            lines.append(f"  Avg cycles completed: {avg_cycles:.1f}")
+            lines.append(f"  Avg churn score: {avg_churn_score:.2f}")
+            lines.append(f"  High risk (>0.7): {high_risk} ({high_risk/active*100:.1f}%)")
+            lines.append("")
+
+        if data.get('cancelled'):
+            lines.append("Cancelled Subscriptions:")
+            lines.append(f"  Avg cycles before cancel: {avg_cycles_cancel:.1f}")
+
+        # Include high-risk subscribers if requested
+        if include_churn_risk and high_risk > 0:
+            churn_query = """
+            {
+              active: Subscriptions(
+                where: {status: {_eq: "ACTIVE"}, churnScore: {_gt: 0.7}}
+                order_by: {churnScore: desc}
+                limit: 10
+              ) {
+                id
+                churnScore
+                cyclesCompleted
+                nextBillingDate
+                StorefrontUser {
+                  email
+                  firstName
+                  lastName
+                }
+              }
+            }
+            """
+
+            churn_response = requests.post(GRAPHQL_URL, json={'query': churn_query}, headers=headers)
+            churn_response.raise_for_status()
+            churn_data = churn_response.json().get('data', {})
+
+            if churn_data.get('active'):
+                lines.append("")
+                lines.append("=== TOP 10 HIGH CHURN RISK SUBSCRIBERS ===")
+                lines.append(f"{'Score':<8} {'Cycles':<8} {'Next Bill':<12} {'Customer':<40}")
+                lines.append("-" * 70)
+
+                for sub in churn_data['active']:
+                    score = float(sub.get('churnScore', 0))
+                    cycles = sub['cyclesCompleted']
+                    next_bill = sub.get('nextBillingDate', '')[:10] if sub.get('nextBillingDate') else 'N/A'
+
+                    user = sub.get('StorefrontUser', {})
+                    name = f"{user.get('firstName', '')} {user.get('lastName', '')}".strip()
+                    email = user.get('email', '')
+                    customer = f"{name} ({email})" if name else email
+
+                    lines.append(f"{score:<8.2f} {cycles:<8} {next_bill:<12} {customer[:38]:<40}")
+
+        return "\n".join(lines)
+
+    except requests.exceptions.RequestException as e:
+        return f"Error fetching SKIO data: {e}"
+    except Exception as e:
+        return f"Error in SKIO health metrics: {e}"
