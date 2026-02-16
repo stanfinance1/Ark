@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 from ddgs import DDGS
 
 from config import BASE_DIR, TMP_DIR
+from bi_cache import get_cached_or_fetch
 
 logger = logging.getLogger(__name__)
 PYTHON = sys.executable
@@ -1237,7 +1238,10 @@ def _suggest_meeting_with_context(reason: str, proposed_attendees: list, propose
 
 def _get_shopify_metrics(timeframe: str = "today") -> str:
     """Fetch Shopify sales metrics for a given timeframe."""
-    try:
+    cache_key = f"shopify_metrics_{timeframe}"
+
+    def fetch():
+        try:
         # Load environment variables
         from dotenv import load_dotenv
         from pathlib import Path
@@ -1331,17 +1335,22 @@ def _get_shopify_metrics(timeframe: str = "today") -> str:
         lines.append(f"Total Sales:   ${total_sales:,.2f}")
         lines.append(f"AOV (Avg):     ${aov:,.2f}")
 
-        return "\n".join(lines)
+            return "\n".join(lines)
 
-    except requests.exceptions.RequestException as e:
-        return f"Error fetching Shopify data: {e}"
-    except Exception as e:
-        return f"Error in Shopify metrics: {e}"
+        except requests.exceptions.RequestException as e:
+            return f"Error fetching Shopify data: {e}"
+        except Exception as e:
+            return f"Error in Shopify metrics: {e}"
+
+    return get_cached_or_fetch(cache_key, fetch)
 
 
 def _get_meta_ads_performance(timeframe: str = "last_7d") -> str:
     """Fetch Meta Ads performance metrics."""
-    try:
+    cache_key = f"meta_ads_{timeframe}"
+
+    def fetch():
+        try:
         # Load environment variables
         from dotenv import load_dotenv
         from pathlib import Path
@@ -1429,17 +1438,22 @@ def _get_meta_ads_performance(timeframe: str = "last_7d") -> str:
         lines.append(f"Target CPA:    ${TARGET_CAC:.2f}")
         lines.append(f"Warning Level: ${WARNING_CAC:.2f}")
 
-        return "\n".join(lines)
+            return "\n".join(lines)
 
-    except requests.exceptions.RequestException as e:
-        return f"Error fetching Meta Ads data: {e}"
-    except Exception as e:
-        return f"Error in Meta Ads metrics: {e}"
+        except requests.exceptions.RequestException as e:
+            return f"Error fetching Meta Ads data: {e}"
+        except Exception as e:
+            return f"Error in Meta Ads metrics: {e}"
+
+    return get_cached_or_fetch(cache_key, fetch)
 
 
 def _get_skio_health(include_churn_risk: bool = False) -> str:
     """Fetch SKIO subscription health metrics."""
-    try:
+    cache_key = f"skio_health_{include_churn_risk}"
+
+    def fetch():
+        try:
         # Load environment variables
         from dotenv import load_dotenv
         from pathlib import Path
@@ -1577,9 +1591,11 @@ def _get_skio_health(include_churn_risk: bool = False) -> str:
 
                     lines.append(f"{score:<8.2f} {cycles:<8} {next_bill:<12} {customer[:38]:<40}")
 
-        return "\n".join(lines)
+            return "\n".join(lines)
 
-    except requests.exceptions.RequestException as e:
-        return f"Error fetching SKIO data: {e}"
-    except Exception as e:
-        return f"Error in SKIO health metrics: {e}"
+        except requests.exceptions.RequestException as e:
+            return f"Error fetching SKIO data: {e}"
+        except Exception as e:
+            return f"Error in SKIO health metrics: {e}"
+
+    return get_cached_or_fetch(cache_key, fetch)
