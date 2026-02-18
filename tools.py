@@ -1269,25 +1269,28 @@ def _get_shopify_metrics(timeframe: str = "today") -> str:
             token_response.raise_for_status()
             access_token = token_response.json()['access_token']
 
-            # Calculate date range
+            # Calculate date range in Pacific Time
             from datetime import datetime, timedelta
-            now = datetime.now()
+            from zoneinfo import ZoneInfo
+
+            pacific = ZoneInfo("America/Los_Angeles")
+            now = datetime.now(pacific)
 
             date_ranges = {
-                'today': (now.replace(hour=0, minute=0, second=0), now),
+                'today': (now.replace(hour=0, minute=0, second=0, microsecond=0), now),
                 'yesterday': (
-                    (now - timedelta(days=1)).replace(hour=0, minute=0, second=0),
-                    now.replace(hour=0, minute=0, second=0)
+                    (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0),
+                    now.replace(hour=0, minute=0, second=0, microsecond=0)
                 ),
                 'this_week': (now - timedelta(days=now.weekday()), now),
                 'last_week': (
                     now - timedelta(days=now.weekday() + 7),
                     now - timedelta(days=now.weekday())
                 ),
-                'this_month': (now.replace(day=1, hour=0, minute=0, second=0), now),
+                'this_month': (now.replace(day=1, hour=0, minute=0, second=0, microsecond=0), now),
                 'last_month': (
-                    (now.replace(day=1) - timedelta(days=1)).replace(day=1, hour=0, minute=0, second=0),
-                    now.replace(day=1, hour=0, minute=0, second=0)
+                    (now.replace(day=1) - timedelta(days=1)).replace(day=1, hour=0, minute=0, second=0, microsecond=0),
+                    now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
                 ),
                 'last_7_days': (now - timedelta(days=7), now),
                 'last_30_days': (now - timedelta(days=30), now),

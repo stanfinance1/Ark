@@ -9,7 +9,8 @@ import time
 import logging
 from dotenv import load_dotenv
 
-from config import CLAUDE_MODEL, MAX_TOKENS, SYSTEM_PROMPT
+import re
+from config import CLAUDE_MODEL_SONNET, CLAUDE_MODEL_HAIKU, MAX_TOKENS, SYSTEM_PROMPT
 from tools import TOOL_DEFINITIONS, execute_tool
 from memory import ConversationMemory
 
@@ -23,13 +24,74 @@ memory = ConversationMemory()
 # Keeps the conversation context lean so we don't blow the 10k token/min rate limit.
 MAX_TOOL_RESULT_CHARS = 6000
 
+# --- Model Router ---
+# Keywords/patterns that indicate a simple task (-> Haiku)
+_SIMPLE_PATTERNS = [
+    # Greetings & small talk
+    r"^(hey|hi|hello|yo|sup|thanks|thank you|gm|good morning|good afternoon|good evening)\b",
+    # API / metrics pulls
+    r"\b(sales|revenue|orders|aov)\b.*(today|yesterday|this week|this month|last \d+)",
+    r"\b(what|how).*(sales|revenue|orders|aov|spend|cpa|roas|conversions?|subscribers?|churn|retention)\b",
+    r"\b(shopify|meta ads?|skio|subscription)\b.*(metrics?|numbers?|stats?|data|performance|health)\b",
+    r"\b(get|pull|show|check|fetch)\b.*(metrics?|numbers?|stats?|data|performance)\b",
+    # Reminders
+    r"\b(remind|reminder|set a reminder|cancel reminder|list reminders|my reminders)\b",
+    # Simple lookups
+    r"\b(what time|what day|what date)\b",
+    # Bot registry
+    r"\b(bot_lookup|bot_list|bot_roster|discover_bots|who are the bots|list bots)\b",
+    # File reads
+    r"\b(read|open|show)\b.*\b(file|document)\b",
+    # Simple yes/no, acknowledgments
+    r"^(yes|no|yep|nope|sure|ok|okay|cool|got it|sounds good|perfect)\b",
+]
 
-def _call_api(messages, retry_delays=(2, 5, 15)):
+# Keywords that indicate a complex task (-> Sonnet)
+_COMPLEX_PATTERNS = [
+    r"\b(analy[sz]e|diagnosis|diagnose|investigate|deep dive|strategy|strategic)\b",
+    r"\b(compare|correlat|regression|forecast|predict|model|project|scenario)\b",
+    r"\b(write|draft|create|build|design|architect|refactor|implement)\b.*(report|plan|model|code|script|document|page|email)",
+    r"\b(why|explain|break down|walk me through|what do you think)\b",
+    r"\b(research|find out|look into|dig into)\b",
+    r"\b(summarize|summary|recap)\b.*\b(conversation|thread|discussion)\b",
+    r"\b(schedule|meeting|calendar)\b",
+    r"\b(multi.?step|complex|comprehensive|detailed|thorough)\b",
+]
+
+
+def select_model(user_text: str) -> str:
+    """Pick the right model based on message complexity. Returns model ID string."""
+    text = user_text.lower().strip()
+
+    # Very short messages (< 15 chars) are almost always simple
+    if len(text) < 15:
+        logger.info(f"Model router -> HAIKU (short message: {len(text)} chars)")
+        return CLAUDE_MODEL_HAIKU
+
+    # Check for complex patterns first (they win ties)
+    for pattern in _COMPLEX_PATTERNS:
+        if re.search(pattern, text):
+            logger.info(f"Model router -> SONNET (matched complex: {pattern})")
+            return CLAUDE_MODEL_SONNET
+
+    # Check for simple patterns
+    for pattern in _SIMPLE_PATTERNS:
+        if re.search(pattern, text):
+            logger.info(f"Model router -> HAIKU (matched simple: {pattern})")
+            return CLAUDE_MODEL_HAIKU
+
+    # Default to Haiku for unmatched messages (most Slack chatter is simple)
+    logger.info("Model router -> HAIKU (default)")
+    return CLAUDE_MODEL_HAIKU
+
+
+def _call_api(messages, model=None, retry_delays=(2, 5, 15)):
     """Call Claude API with retry on rate limit. Returns response or raises."""
+    use_model = model or CLAUDE_MODEL_HAIKU
     for attempt, delay in enumerate(retry_delays):
         try:
             return client.messages.create(
-                model=CLAUDE_MODEL,
+                model=use_model,
                 max_tokens=MAX_TOKENS,
                 system=SYSTEM_PROMPT,
                 tools=TOOL_DEFINITIONS,
@@ -40,7 +102,7 @@ def _call_api(messages, retry_delays=(2, 5, 15)):
             time.sleep(delay)
     # Final attempt - let it raise if still rate limited
     return client.messages.create(
-        model=CLAUDE_MODEL,
+        model=use_model,
         max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT,
         tools=TOOL_DEFINITIONS,
@@ -74,9 +136,12 @@ def think(user_text: str, channel: str, thread_ts: str, slack_context: dict = No
     # Track files generated during tool use (for Slack upload)
     generated_files = []
 
+    # Select model based on message complexity
+    model = select_model(user_text)
+
     # First API call
     try:
-        response = _call_api(history)
+        response = _call_api(history, model=model)
     except anthropic.RateLimitError:
         return {"text": "I'm being rate limited right now. Please try again in a minute.", "files": []}
 
@@ -123,9 +188,9 @@ def think(user_text: str, channel: str, thread_ts: str, slack_context: dict = No
 
         history.append({"role": "user", "content": tool_results})
 
-        # Call Claude again with tool results
+        # Call Claude again with tool results (same model for the whole conversation)
         try:
-            response = _call_api(history)
+            response = _call_api(history, model=model)
         except anthropic.RateLimitError:
             logger.warning("Rate limited during tool loop, returning partial response.")
             # Try to extract any text Claude already produced

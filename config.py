@@ -5,8 +5,10 @@ Bakes in MEMORY.md business context so Ark has the same knowledge as Claude Code
 
 import os
 
-# Claude model to use (Sonnet for balance of speed + capability)
-CLAUDE_MODEL = "claude-sonnet-4-5-20250929"
+# Claude models - Ark auto-selects based on task complexity
+CLAUDE_MODEL_SONNET = "claude-sonnet-4-5-20250929"
+CLAUDE_MODEL_HAIKU = "claude-haiku-4-5-20251001"
+CLAUDE_MODEL = CLAUDE_MODEL_SONNET  # default fallback
 MAX_TOKENS = 4096
 
 # Base directory (app root on Railway, or claude-only/ locally)
