@@ -210,7 +210,31 @@ def think(user_text: str, channel: str, thread_ts: str, slack_context: dict = No
     memory.save_message(channel, thread_ts, "user", user_text)
     memory.save_message(channel, thread_ts, "assistant", assistant_text)
 
+    # Auto-log substantive conversations to Supabase shared memory
+    _maybe_log_conversation(channel, thread_ts, user_name, user_text, assistant_text, iteration, model)
+
     return {
         "text": assistant_text,
         "files": generated_files,
     }
+
+
+def _maybe_log_conversation(channel, thread_ts, user_name, user_text, assistant_text, tool_iterations, model):
+    """Log substantive conversations to Supabase. Never fails the main flow."""
+    try:
+        # Only log if conversation was substantive (used tools or long response)
+        if tool_iterations < 1 and len(assistant_text) < 200:
+            return
+
+        from shared_memory import log_conversation
+        summary = assistant_text[:200].replace("\n", " ").strip()
+        model_label = "sonnet" if "sonnet" in model else "haiku"
+        log_conversation(
+            channel=channel,
+            thread_ts=thread_ts,
+            user_name=user_name,
+            summary=f"Q: {user_text[:100]} | A: {summary}",
+            model_used=model_label,
+        )
+    except Exception:
+        pass  # Never break the bot for logging

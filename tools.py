@@ -399,6 +399,31 @@ TOOL_DEFINITIONS = [
             "required": ["reason", "proposed_attendees", "proposed_agenda"],
         },
     },
+    # --- Shared Memory Tools ---
+    {
+        "name": "check_shared_memory",
+        "description": "Query the shared memory database (Supabase) to see what Claude Code has been working on, read shared decisions/facts, or review recent task history. Use this when someone asks 'what has Claude Code been working on?', 'what were the recent decisions?', or when you need context about past work.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "What to query: 'recent_tasks' (latest tasks from both systems), 'recent_conversations' (Ark's conversation log), 'read_memory' (shared decisions/facts), 'search' (text search across all memories).",
+                    "enum": ["recent_tasks", "recent_conversations", "read_memory", "search"],
+                },
+                "query": {
+                    "type": "string",
+                    "description": "For 'search': the search term. For 'read_memory': optional category filter ('decision', 'fact', 'preference', 'context'). For others: ignored.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results to return. Defaults to 10.",
+                    "default": 10,
+                },
+            },
+            "required": ["action"],
+        },
+    },
     # --- Business Intelligence Tools ---
     {
         "name": "get_shopify_metrics",
@@ -586,6 +611,12 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
                 inputs.get("suggested_duration", 30),
                 inputs.get("schedule_immediately", False),
                 slack_context,
+            )
+        elif name == "check_shared_memory":
+            return _check_shared_memory(
+                inputs.get("action", "recent_tasks"),
+                inputs.get("query", ""),
+                inputs.get("limit", 10),
             )
         elif name == "get_shopify_metrics":
             return _get_shopify_metrics(inputs.get("timeframe", "today"))
@@ -1175,6 +1206,22 @@ def _send_summary_to_stan(summary: str, key_points: list, action_items: list, re
             text=message_text,
             mrkdwn=True,
         )
+
+        # Also log to Supabase shared memory
+        try:
+            from shared_memory import log_conversation
+            log_conversation(
+                channel=channel,
+                thread_ts=thread_ts,
+                user_name=user_name,
+                summary=summary,
+                key_points=key_points,
+                action_items=action_items,
+                model_used="sonnet",
+            )
+        except Exception:
+            pass  # Never break summary sending for logging
+
         return f"Summary sent to Stan via DM. Urgency: {urgency}"
     except Exception as e:
         return f"Error sending summary to Stan: {e}"
@@ -1230,6 +1277,80 @@ def _suggest_meeting_with_context(reason: str, proposed_attendees: list, propose
         lines.append("- Or feel free to schedule it yourself and I can help with the invite details")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Shared Memory Tools
+# ---------------------------------------------------------------------------
+
+def _check_shared_memory(action: str, query: str = "", limit: int = 10) -> str:
+    """Query the Supabase shared memory database."""
+    import json as _json
+    try:
+        from shared_memory import get_memory, search_memory, get_recent_conversations, get_recent_tasks
+    except ImportError:
+        return "Error: shared_memory module not available."
+
+    if action == "recent_tasks":
+        tasks = get_recent_tasks(limit=limit)
+        if not tasks:
+            return "No tasks logged yet."
+        lines = ["=== RECENT TASKS ==="]
+        for t in tasks:
+            ts = t['created_at'][:16] if t.get('created_at') else '?'
+            lines.append(f"\n[{ts}] ({t['source']}) {t['task_name']}")
+            if t.get('description'):
+                lines.append(f"  {t['description']}")
+            if t.get('outcome'):
+                lines.append(f"  Outcome: {t['outcome']}")
+        return "\n".join(lines)
+
+    elif action == "recent_conversations":
+        convos = get_recent_conversations(limit=limit)
+        if not convos:
+            return "No conversations logged yet."
+        lines = ["=== RECENT CONVERSATIONS ==="]
+        for c in convos:
+            ts = c['created_at'][:16] if c.get('created_at') else '?'
+            model = c.get('model_used', '?')
+            user = c.get('user_name', '?')
+            lines.append(f"\n[{ts}] ({model}) {user}: {c['summary']}")
+            pts = c.get('key_points', [])
+            if isinstance(pts, str):
+                pts = _json.loads(pts)
+            for pt in pts:
+                lines.append(f"  - {pt}")
+            items = c.get('action_items', [])
+            if isinstance(items, str):
+                items = _json.loads(items)
+            for item in items:
+                lines.append(f"  TODO: {item}")
+        return "\n".join(lines)
+
+    elif action == "read_memory":
+        rows = get_memory(category=query if query else None)
+        if not rows:
+            return f"No shared memory entries{' in category: ' + query if query else ''}."
+        lines = ["=== SHARED MEMORY ==="]
+        for r in rows:
+            lines.append(f"\n[{r['category']}/{r['key']}] ({r['source']}, {r['updated_at'][:16]})")
+            lines.append(f"  {r['value']}")
+        return "\n".join(lines)
+
+    elif action == "search":
+        if not query:
+            return "Error: 'query' is required for search action."
+        rows = search_memory(query)
+        if not rows:
+            return f"No results for '{query}'."
+        lines = [f"=== SEARCH: '{query}' ==="]
+        for r in rows:
+            lines.append(f"\n[{r['category']}/{r['key']}] ({r['source']})")
+            lines.append(f"  {r['value']}")
+        return "\n".join(lines)
+
+    else:
+        return f"Unknown action: {action}. Use: recent_tasks, recent_conversations, read_memory, search."
 
 
 # ---------------------------------------------------------------------------
