@@ -401,6 +401,29 @@ TOOL_DEFINITIONS = [
     },
     # --- Shared Memory Tools ---
     {
+        "name": "store_shared_memory",
+        "description": "Store a decision, fact, preference, or context in the shared Supabase memory. Use this when: (1) a decision is made during conversation that should persist, (2) you learn a new fact about the business, (3) a user states a preference, (4) important context should be available to Claude Code later. This creates persistent cross-system memory.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": "Type of memory: 'decision' (choices made), 'fact' (business data), 'preference' (user preferences), 'context' (situational info).",
+                    "enum": ["decision", "fact", "preference", "context"],
+                },
+                "key": {
+                    "type": "string",
+                    "description": "Short identifier for this memory (e.g. 'cac_target', 'preferred_report_format', 'q1_revenue_goal'). Use snake_case.",
+                },
+                "value": {
+                    "type": "string",
+                    "description": "The actual content to remember.",
+                },
+            },
+            "required": ["category", "key", "value"],
+        },
+    },
+    {
         "name": "check_shared_memory",
         "description": "Query the shared memory database (Supabase) to see what Claude Code has been working on, read shared decisions/facts, or review recent task history. Use this when someone asks 'what has Claude Code been working on?', 'what were the recent decisions?', or when you need context about past work.",
         "input_schema": {
@@ -611,6 +634,12 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
                 inputs.get("suggested_duration", 30),
                 inputs.get("schedule_immediately", False),
                 slack_context,
+            )
+        elif name == "store_shared_memory":
+            return _store_shared_memory(
+                inputs.get("category", ""),
+                inputs.get("key", ""),
+                inputs.get("value", ""),
             )
         elif name == "check_shared_memory":
             return _check_shared_memory(
@@ -1282,6 +1311,20 @@ def _suggest_meeting_with_context(reason: str, proposed_attendees: list, propose
 # ---------------------------------------------------------------------------
 # Shared Memory Tools
 # ---------------------------------------------------------------------------
+
+def _store_shared_memory(category: str, key: str, value: str) -> str:
+    """Store a decision/fact/preference/context in Supabase shared memory."""
+    if not category or not key or not value:
+        return "Error: category, key, and value are all required."
+    try:
+        from shared_memory import store_memory
+        ok = store_memory(category, key, value, source="ark")
+        if ok:
+            return f"Stored in shared memory: [{category}/{key}] = {value[:100]}"
+        return "Error: Failed to store in shared memory (Supabase unavailable)."
+    except Exception as e:
+        return f"Error storing shared memory: {e}"
+
 
 def _check_shared_memory(action: str, query: str = "", limit: int = 10) -> str:
     """Query the Supabase shared memory database."""

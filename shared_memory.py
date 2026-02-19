@@ -166,3 +166,105 @@ def get_recent_tasks(limit: int = 10, source: str = None) -> list:
     except Exception as e:
         logger.error(f"get_recent_tasks failed: {e}")
         return []
+
+
+# --- bi_cache table ---
+
+# TTL per metric type (seconds). Historical data stays longer.
+_BI_TTL = {
+    "shopify_today": 900,       # 15 min - active data changes
+    "shopify_yesterday": 21600, # 6 hours - finalized
+    "shopify_": 3600,           # 1 hour - default for other shopify timeframes
+    "meta_ads_": 1800,          # 30 min
+    "skio_": 3600,              # 1 hour
+}
+
+
+def _get_ttl(cache_key: str) -> int:
+    """Get TTL for a cache key based on prefix matching."""
+    for prefix, ttl in _BI_TTL.items():
+        if cache_key.startswith(prefix):
+            return ttl
+    return 900  # 15 min default
+
+
+def get_bi_cache(metric_type: str, timeframe: str) -> str | None:
+    """Get cached BI data from Supabase. Returns None if stale or missing."""
+    client = get_client()
+    if not client:
+        return None
+    try:
+        result = (client.table("bi_cache")
+                  .select("data,fetched_at")
+                  .eq("metric_type", metric_type)
+                  .eq("timeframe", timeframe)
+                  .execute())
+        if not result.data:
+            return None
+        row = result.data[0]
+        fetched_at = datetime.fromisoformat(row["fetched_at"].replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - fetched_at).total_seconds()
+        cache_key = f"{metric_type}_{timeframe}"
+        ttl = _get_ttl(cache_key)
+        if age > ttl:
+            return None  # stale
+        remaining = int(ttl - age)
+        return row["data"] + f"\n\n[Cached {int(age)}s ago - refreshes in {remaining}s]"
+    except Exception as e:
+        logger.error(f"get_bi_cache failed: {e}")
+        return None
+
+
+def set_bi_cache(metric_type: str, timeframe: str, data: str) -> bool:
+    """Store BI data in Supabase cache. Upserts."""
+    client = get_client()
+    if not client:
+        return False
+    try:
+        client.table("bi_cache").upsert({
+            "metric_type": metric_type,
+            "timeframe": timeframe,
+            "data": data,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }, on_conflict="metric_type,timeframe").execute()
+        return True
+    except Exception as e:
+        logger.error(f"set_bi_cache failed: {e}")
+        return False
+
+
+# --- Context loader (for Ark brain auto-inject) ---
+
+def load_shared_context(max_convos: int = 5, max_tasks: int = 5) -> str:
+    """Build a context string from recent shared memory for injection into Ark's brain.
+    Returns empty string if Supabase is unavailable."""
+    parts = []
+
+    # Recent decisions/facts
+    memories = get_memory(category="decision")
+    memories += get_memory(category="fact")
+    if memories:
+        parts.append("## Recent Shared Knowledge")
+        for m in memories[:10]:
+            parts.append(f"- [{m['category']}] {m['key']}: {m['value']}")
+
+    # Recent tasks (from both systems)
+    tasks = get_recent_tasks(limit=max_tasks)
+    if tasks:
+        parts.append("\n## Recent Tasks (Claude Code + Ark)")
+        for t in tasks:
+            ts = t['created_at'][:10] if t.get('created_at') else '?'
+            parts.append(f"- [{ts}] ({t['source']}) {t['task_name']}")
+
+    # Recent conversations
+    convos = get_recent_conversations(limit=max_convos)
+    if convos:
+        parts.append("\n## Recent Ark Conversations")
+        for c in convos:
+            ts = c['created_at'][:16] if c.get('created_at') else '?'
+            user = c.get('user_name', '?')
+            parts.append(f"- [{ts}] {user}: {c['summary'][:120]}")
+
+    if not parts:
+        return ""
+    return "\n".join(parts)

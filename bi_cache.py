@@ -1,90 +1,67 @@
 """
-Business Intelligence Data Cache
-Reduces API calls by caching BI tool results with TTL (time-to-live).
+Business Intelligence Data Cache - Supabase-backed with in-memory fallback.
+Survives Railway redeploys. Both Ark and Claude Code share the same cache.
 """
 
 import time
-from typing import Optional, Callable, Any
+import logging
+from typing import Callable
 
-# Cache structure: {cache_key: {"result": str, "timestamp": float}}
-_cache = {}
+logger = logging.getLogger(__name__)
 
-# Cache TTL in seconds (5 minutes = 300s)
-CACHE_TTL_SECONDS = 300
+# In-memory fallback (used only when Supabase is unavailable)
+_fallback_cache = {}
+_FALLBACK_TTL = 300  # 5 min
 
 
 def get_cached_or_fetch(
     cache_key: str,
-    fetch_fn: Callable[[], Any],
-    ttl_seconds: int = CACHE_TTL_SECONDS
+    fetch_fn: Callable[[], str],
 ) -> str:
     """
-    Get cached result if still valid, otherwise fetch fresh data and cache it.
-
-    Args:
-        cache_key: Unique identifier for this cache entry
-        fetch_fn: Function to call if cache miss (should return string result)
-        ttl_seconds: How long to cache the result (default 300s = 5 min)
-
-    Returns:
-        Cached or freshly fetched result string
+    Check Supabase cache first → return if fresh.
+    If stale/missing → call API → store in Supabase + return.
+    Falls back to in-memory cache if Supabase is down.
     """
-    now = time.time()
+    # Parse cache_key like "shopify_metrics_today" → metric_type="shopify", timeframe="today"
+    parts = cache_key.split("_", 1)  # e.g. ["shopify", "metrics_today"]
+    if len(parts) >= 2:
+        metric_type = parts[0]
+        timeframe = parts[1]
+    else:
+        metric_type = cache_key
+        timeframe = "default"
 
-    # Check if we have a valid cached entry
-    if cache_key in _cache:
-        entry = _cache[cache_key]
-        age = now - entry["timestamp"]
+    # Try Supabase cache first
+    try:
+        from shared_memory import get_bi_cache, set_bi_cache
+        cached = get_bi_cache(metric_type, timeframe)
+        if cached is not None:
+            logger.info(f"BI cache HIT (Supabase): {cache_key}")
+            return cached
+    except Exception as e:
+        logger.warning(f"Supabase cache read failed: {e}")
 
-        if age < ttl_seconds:
-            # Cache hit - return cached result
-            remaining = int(ttl_seconds - age)
-            result = entry["result"]
-            result += f"\n\n[Cached data - {remaining}s until refresh]"
-            return result
-
-    # Cache miss or expired - fetch fresh data
+    # Cache miss - fetch fresh data from API
+    logger.info(f"BI cache MISS: {cache_key} - fetching from API")
     result = fetch_fn()
 
-    # Store in cache
-    _cache[cache_key] = {
-        "result": result,
-        "timestamp": now
-    }
+    # Store in Supabase cache
+    try:
+        from shared_memory import set_bi_cache
+        set_bi_cache(metric_type, timeframe, result)
+    except Exception as e:
+        logger.warning(f"Supabase cache write failed: {e}")
+        # Fallback: store in memory
+        _fallback_cache[cache_key] = {"result": result, "timestamp": time.time()}
 
-    return result + "\n\n[Fresh data - cached for 5 minutes]"
+    return result + "\n\n[Fresh data - now cached in Supabase]"
 
 
-def clear_cache(cache_key: Optional[str] = None):
-    """
-    Clear cache entries.
-
-    Args:
-        cache_key: Specific key to clear, or None to clear all
-    """
-    global _cache
-
+def clear_cache(cache_key: str = None):
+    """Clear in-memory fallback cache."""
+    global _fallback_cache
     if cache_key is None:
-        _cache = {}
-    elif cache_key in _cache:
-        del _cache[cache_key]
-
-
-def get_cache_stats() -> dict:
-    """Get cache statistics."""
-    now = time.time()
-
-    stats = {
-        "total_entries": len(_cache),
-        "entries": []
-    }
-
-    for key, entry in _cache.items():
-        age = now - entry["timestamp"]
-        stats["entries"].append({
-            "key": key,
-            "age_seconds": int(age),
-            "size_bytes": len(entry["result"])
-        })
-
-    return stats
+        _fallback_cache = {}
+    elif cache_key in _fallback_cache:
+        del _fallback_cache[cache_key]

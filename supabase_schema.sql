@@ -45,7 +45,21 @@ ALTER TABLE shared_memory ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversation_log ENABLE ROW LEVEL SECURITY;
 ALTER TABLE task_log ENABLE ROW LEVEL SECURITY;
 
+-- Table 4: bi_cache (Supabase-backed BI data cache, survives deploys)
+CREATE TABLE bi_cache (
+    id BIGSERIAL PRIMARY KEY,
+    metric_type TEXT NOT NULL,       -- 'shopify', 'meta_ads', 'skio'
+    timeframe TEXT NOT NULL,         -- 'today', 'yesterday', 'last_7d', etc.
+    data TEXT NOT NULL,              -- the full formatted metrics response
+    fetched_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(metric_type, timeframe)
+);
+CREATE INDEX idx_bi_cache_lookup ON bi_cache(metric_type, timeframe);
+
+ALTER TABLE bi_cache ENABLE ROW LEVEL SECURITY;
+
 -- Policies: allow all operations with anon key (our internal tools only)
 CREATE POLICY "Allow all on shared_memory" ON shared_memory FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all on conversation_log" ON conversation_log FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all on task_log" ON task_log FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow all on bi_cache" ON bi_cache FOR ALL USING (true) WITH CHECK (true);

@@ -117,6 +117,15 @@ def _truncate(text: str, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
     return text[:limit] + "\n\n... (truncated to save context)"
 
 
+def _get_shared_context() -> str:
+    """Load shared context from Supabase. Returns empty string on failure."""
+    try:
+        from shared_memory import load_shared_context
+        return load_shared_context(max_convos=5, max_tasks=5)
+    except Exception:
+        return ""
+
+
 def think(user_text: str, channel: str, thread_ts: str, slack_context: dict = None, user_name: str = "unknown", user_id: str = "unknown") -> dict:
     """
     Process a user message through Claude with tool use.
@@ -129,6 +138,13 @@ def think(user_text: str, channel: str, thread_ts: str, slack_context: dict = No
 
     # Load conversation history
     history = memory.get_history(channel, thread_ts)
+
+    # On first message in a thread, inject shared context from Supabase
+    if not history:
+        shared_ctx = _get_shared_context()
+        if shared_ctx:
+            history.append({"role": "user", "content": f"[SYSTEM CONTEXT - Shared memory from Supabase]\n{shared_ctx}\n[END CONTEXT]"})
+            history.append({"role": "assistant", "content": "Understood. I have the shared context loaded."})
 
     # Add the new user message with sender identity
     history.append({"role": "user", "content": f"[From: {user_name} ({user_id})]\n{user_text}"})
@@ -220,20 +236,19 @@ def think(user_text: str, channel: str, thread_ts: str, slack_context: dict = No
 
 
 def _maybe_log_conversation(channel, thread_ts, user_name, user_text, assistant_text, tool_iterations, model):
-    """Log substantive conversations to Supabase. Never fails the main flow."""
+    """Log ALL conversations to Supabase. Never fails the main flow."""
     try:
-        # Only log if conversation was substantive (used tools or long response)
-        if tool_iterations < 1 and len(assistant_text) < 200:
-            return
-
         from shared_memory import log_conversation
-        summary = assistant_text[:200].replace("\n", " ").strip()
+        # Build a compact but useful summary
+        q_part = user_text[:100].replace("\n", " ").strip()
+        a_part = assistant_text[:200].replace("\n", " ").strip()
+        summary = f"Q: {q_part} | A: {a_part}"
         model_label = "sonnet" if "sonnet" in model else "haiku"
         log_conversation(
             channel=channel,
             thread_ts=thread_ts,
             user_name=user_name,
-            summary=f"Q: {user_text[:100]} | A: {summary}",
+            summary=summary,
             model_used=model_label,
         )
     except Exception:
