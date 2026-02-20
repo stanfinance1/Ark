@@ -233,6 +233,87 @@ def set_bi_cache(metric_type: str, timeframe: str, data: str) -> bool:
         return False
 
 
+# --- daily_metrics table ---
+
+def get_daily_metric(date: str, source: str) -> dict | None:
+    """Get daily metrics for a specific date and source.
+    Args:
+        date: YYYY-MM-DD (Pacific calendar day)
+        source: 'shopify_dtc' | 'shopify_wholesale' | 'meta_ads'
+    Returns: dict of metrics or None if not found.
+    """
+    client = get_client()
+    if not client:
+        return None
+    try:
+        result = (client.table("daily_metrics")
+                  .select("data,date,source,updated_at")
+                  .eq("date", date)
+                  .eq("source", source)
+                  .execute())
+        if not result.data:
+            return None
+        row = result.data[0]
+        data = row["data"] if isinstance(row["data"], dict) else json.loads(row["data"])
+        data["_date"] = row["date"]
+        data["_source"] = row["source"]
+        data["_cached_at"] = row["updated_at"]
+        return data
+    except Exception as e:
+        logger.error(f"get_daily_metric failed: {e}")
+        return None
+
+
+def set_daily_metric(date: str, source: str, data: dict) -> bool:
+    """Upsert daily metrics for a specific date and source."""
+    client = get_client()
+    if not client:
+        return False
+    try:
+        client.table("daily_metrics").upsert({
+            "date": date,
+            "source": source,
+            "data": json.dumps(data) if isinstance(data, dict) else data,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }, on_conflict="date,source").execute()
+        return True
+    except Exception as e:
+        logger.error(f"set_daily_metric failed: {e}")
+        return False
+
+
+def get_date_range_metrics(source: str, start_date: str, end_date: str) -> list:
+    """Get daily metrics for a date range, sorted by date.
+    Args:
+        source: 'shopify_dtc' | 'shopify_wholesale' | 'meta_ads'
+        start_date: YYYY-MM-DD (inclusive)
+        end_date: YYYY-MM-DD (inclusive)
+    Returns: list of dicts with 'date' + metric fields.
+    """
+    client = get_client()
+    if not client:
+        return []
+    try:
+        result = (client.table("daily_metrics")
+                  .select("date,data,updated_at")
+                  .eq("source", source)
+                  .gte("date", start_date)
+                  .lte("date", end_date)
+                  .order("date")
+                  .execute())
+        rows = result.data or []
+        out = []
+        for row in rows:
+            d = row["data"] if isinstance(row["data"], dict) else json.loads(row["data"])
+            entry = {"date": row["date"]}
+            entry.update(d)
+            out.append(entry)
+        return out
+    except Exception as e:
+        logger.error(f"get_date_range_metrics failed: {e}")
+        return []
+
+
 # --- Context loader (for Ark brain auto-inject) ---
 
 def load_shared_context(max_convos: int = 5, max_tasks: int = 5) -> str:
@@ -268,3 +349,72 @@ def load_shared_context(max_convos: int = 5, max_tasks: int = 5) -> str:
     if not parts:
         return ""
     return "\n".join(parts)
+
+
+# --- tool_registry + tool_usage_log tables ---
+
+def log_tool_usage(tool_name: str, system: str, invoked_by: str = None,
+                   success: bool = True, duration_ms: int = None) -> bool:
+    """Log a tool invocation to tool_usage_log.
+    The DB trigger auto-bumps use_count/last_used_at on tool_registry."""
+    client = get_client()
+    if not client:
+        return False
+    try:
+        row = {
+            "tool_name": tool_name,
+            "system": system,
+            "success": success,
+        }
+        if invoked_by:
+            row["invoked_by"] = invoked_by
+        if duration_ms is not None:
+            row["duration_ms"] = duration_ms
+        client.table("tool_usage_log").insert(row).execute()
+        return True
+    except Exception as e:
+        logger.error(f"log_tool_usage failed: {e}")
+        return False
+
+
+def register_tool(name: str, system: str, group_name: str = None,
+                  description: str = "", file_path: str = None) -> bool:
+    """Register a new tool (or update existing) in tool_registry.
+    Call this when creating new tools to auto-populate the registry."""
+    client = get_client()
+    if not client:
+        return False
+    try:
+        row = {
+            "name": name,
+            "system": system,
+            "description": description,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if group_name:
+            row["group_name"] = group_name
+        if file_path:
+            row["file_path"] = file_path
+        client.table("tool_registry").upsert(row, on_conflict="name").execute()
+        return True
+    except Exception as e:
+        logger.error(f"register_tool failed: {e}")
+        return False
+
+
+def get_tool_registry(system: str = None, group_name: str = None) -> list:
+    """Get tools from registry, optionally filtered by system or group."""
+    client = get_client()
+    if not client:
+        return []
+    try:
+        q = client.table("tool_registry").select("*").order("system").order("group_name").order("name")
+        if system:
+            q = q.eq("system", system)
+        if group_name:
+            q = q.eq("group_name", group_name)
+        result = q.execute()
+        return result.data or []
+    except Exception as e:
+        logger.error(f"get_tool_registry failed: {e}")
+        return []

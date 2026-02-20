@@ -22,6 +22,43 @@ PYTHON = sys.executable
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 # ---------------------------------------------------------------------------
+# Tool group mapping (name -> group for registry)
+# ---------------------------------------------------------------------------
+TOOL_GROUPS = {
+    "run_python": "core", "read_file": "core", "list_files": "core", "upload_file": "core",
+    "web_search": "web", "fetch_url": "web", "web_research": "web",
+    "create_reminder": "reminders", "list_reminders": "reminders", "cancel_reminder": "reminders",
+    "send_slack_dm": "reminders", "schedule_meeting": "reminders",
+    "bot_lookup": "bot_registry", "bot_update": "bot_registry", "bot_list": "bot_registry",
+    "bot_roster": "bot_registry", "discover_bots": "bot_registry",
+    "analyze_conversation": "conversation", "send_summary_to_stan": "conversation",
+    "suggest_meeting_with_context": "conversation",
+    "store_shared_memory": "shared_memory", "check_shared_memory": "shared_memory",
+    "get_shopify_metrics": "bi", "get_meta_ads_performance": "bi", "get_skio_health": "bi",
+    "get_daily_metrics": "bi",
+}
+
+
+def sync_tool_registry():
+    """Sync all TOOL_DEFINITIONS into Supabase tool_registry on startup.
+    Idempotent -- safe to call on every deploy. New tools auto-register."""
+    try:
+        from shared_memory import register_tool
+        synced = 0
+        for tool in TOOL_DEFINITIONS:
+            name = tool["name"]
+            desc = tool.get("description", "")[:500]  # truncate long descriptions
+            group = TOOL_GROUPS.get(name, "ungrouped")
+            if register_tool(name, "ark", group, desc, "ark/tools.py"):
+                synced += 1
+        logger.info(f"Tool registry sync: {synced}/{len(TOOL_DEFINITIONS)} tools registered")
+        return f"Synced {synced} tools"
+    except Exception as e:
+        logger.warning(f"Tool registry sync failed (non-fatal): {e}")
+        return f"Failed: {e}"
+
+
+# ---------------------------------------------------------------------------
 # Tool definitions (Claude API format)
 # ---------------------------------------------------------------------------
 TOOL_DEFINITIONS = [
@@ -490,6 +527,34 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    # --- Daily Metrics (Supabase cache) ---
+    {
+        "name": "get_daily_metrics",
+        "description": "Look up historical daily metrics from the Supabase cache. This table stores pre-calculated daily snapshots for Shopify DTC, Shopify Wholesale, and Meta Ads. Use this for historical lookups like 'what were yesterday's numbers', 'show me last week's Meta spend', 'compare sales this month vs last month'. Faster and cheaper than hitting live APIs. Data goes back to 2025-01-01.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "description": "Data source to query.",
+                    "enum": ["shopify_dtc", "shopify_wholesale", "meta_ads"],
+                },
+                "date": {
+                    "type": "string",
+                    "description": "Single date to look up (YYYY-MM-DD, Pacific Time). Use this OR start_date/end_date, not both.",
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "Start of date range (YYYY-MM-DD, inclusive). Must be used with end_date.",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "End of date range (YYYY-MM-DD, inclusive). Must be used with start_date.",
+                },
+            },
+            "required": ["source"],
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -552,7 +617,12 @@ def _human_size(size_bytes: int) -> str:
 # ---------------------------------------------------------------------------
 
 def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
-    """Execute a tool and return the result as a string."""
+    """Execute a tool and return the result as a string.
+    Auto-logs usage to tool_usage_log (Supabase trigger bumps tool_registry stats).
+    """
+    import time as _time
+    _t0 = _time.monotonic()
+    _success = True
     try:
         if name == "run_python":
             return _run_python(inputs.get("code", ""), inputs.get("description", ""))
@@ -653,10 +723,30 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
             return _get_meta_ads_performance(inputs.get("timeframe", "last_7d"))
         elif name == "get_skio_health":
             return _get_skio_health(inputs.get("include_churn_risk", False))
+        elif name == "get_daily_metrics":
+            return _get_daily_metrics(
+                inputs.get("source", ""),
+                inputs.get("date"),
+                inputs.get("start_date"),
+                inputs.get("end_date"),
+            )
         else:
             return f"Error: Unknown tool '{name}'"
     except Exception as e:
+        _success = False
         return f"Error executing {name}: {e}"
+    finally:
+        # Auto-log tool usage (fire-and-forget, never block tool execution)
+        try:
+            _elapsed = int((_time.monotonic() - _t0) * 1000)
+            _user = None
+            if slack_context:
+                _user = slack_context.get("user_name") or slack_context.get("user_id")
+            from shared_memory import log_tool_usage
+            log_tool_usage(name, system="ark", invoked_by=_user,
+                           success=_success, duration_ms=_elapsed)
+        except Exception:
+            pass  # never let logging break tool execution
 
 
 # ---------------------------------------------------------------------------
@@ -1766,3 +1856,108 @@ def _get_skio_health(include_churn_risk: bool = False) -> str:
             return f"Error in SKIO health metrics: {e}"
 
     return get_cached_or_fetch(cache_key, fetch)
+
+
+def _get_daily_metrics(source: str, date: str = None, start_date: str = None, end_date: str = None) -> str:
+    """Look up historical daily metrics from the Supabase daily_metrics table."""
+    if not source:
+        return "Error: 'source' is required. Use: shopify_dtc, shopify_wholesale, or meta_ads."
+
+    valid_sources = ("shopify_dtc", "shopify_wholesale", "meta_ads")
+    if source not in valid_sources:
+        return f"Error: Invalid source '{source}'. Use one of: {', '.join(valid_sources)}"
+
+    try:
+        from shared_memory import get_daily_metric, get_date_range_metrics
+    except ImportError:
+        return "Error: shared_memory module not available."
+
+    # Single date lookup
+    if date:
+        data = get_daily_metric(date, source)
+        if not data:
+            return f"No data found for {source} on {date}. Data may not have been backfilled for this date."
+        lines = [f"=== DAILY METRICS: {source.upper()} ({date}) ===", ""]
+        for k, v in data.items():
+            if k.startswith("_"):
+                continue
+            if isinstance(v, float):
+                is_money = any(w in k.lower() for w in ("sales", "spend", "revenue", "cost", "price", "aov", "cpa", "tax", "shipping", "discount"))
+                lines.append(f"  {k}: ${v:,.2f}" if is_money else f"  {k}: {v:,.2f}")
+            elif isinstance(v, int):
+                lines.append(f"  {k}: {v:,}")
+            else:
+                lines.append(f"  {k}: {v}")
+        lines.append(f"\n  (cached at: {data.get('_cached_at', 'unknown')})")
+        return "\n".join(lines)
+
+    # Date range lookup
+    if start_date and end_date:
+        rows = get_date_range_metrics(source, start_date, end_date)
+        if not rows:
+            return f"No data found for {source} from {start_date} to {end_date}."
+        lines = [f"=== DAILY METRICS: {source.upper()} ({start_date} to {end_date}) ==="]
+        lines.append(f"Days with data: {len(rows)}")
+        lines.append("")
+
+        # Detect numeric keys for summary
+        numeric_keys = []
+        for k, v in rows[0].items():
+            if k == "date":
+                continue
+            if isinstance(v, (int, float)):
+                numeric_keys.append(k)
+
+        # Show per-day data (limit to 31 days for readability)
+        if len(rows) <= 31:
+            for row in rows:
+                day = row.get("date", "?")
+                parts = [f"  {day}:"]
+                for k in numeric_keys[:6]:
+                    v = row.get(k, 0)
+                    if isinstance(v, float):
+                        is_money = any(w in k.lower() for w in ("sales", "spend", "revenue", "cost", "price", "aov", "cpa", "tax", "shipping", "discount"))
+                        parts.append(f"{k}=${v:,.2f}" if is_money else f"{k}={v:,.2f}")
+                    else:
+                        parts.append(f"{k}={v:,}")
+                lines.append(" | ".join(parts))
+        else:
+            lines.append(f"  (too many days to show individually -- showing summary only)")
+
+        # Summary totals
+        lines.append("")
+        lines.append("--- TOTALS / AVERAGES ---")
+        for k in numeric_keys:
+            values = [row.get(k, 0) for row in rows]
+            total = sum(values)
+            avg = total / len(values) if values else 0
+            is_money = any(w in k.lower() for w in ("sales", "spend", "revenue", "cost", "price", "tax", "shipping", "discount"))
+            is_avg_metric = any(w in k.lower() for w in ("aov", "cpa", "rate", "ctr", "cpc", "cpm"))
+            if is_avg_metric:
+                lines.append(f"  {k}: avg {avg:,.2f}")
+            elif is_money:
+                lines.append(f"  {k}: total ${total:,.2f} | avg ${avg:,.2f}/day")
+            else:
+                lines.append(f"  {k}: total {total:,.0f} | avg {avg:,.1f}/day")
+
+        return "\n".join(lines)
+
+    # No date provided -- show today (Pacific)
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+    data = get_daily_metric(today, source)
+    if not data:
+        return f"No data found for {source} on {today} (today). Try 'yesterday' or specify a date."
+    lines = [f"=== DAILY METRICS: {source.upper()} ({today}) ===", ""]
+    for k, v in data.items():
+        if k.startswith("_"):
+            continue
+        if isinstance(v, float):
+            is_money = any(w in k.lower() for w in ("sales", "spend", "revenue", "cost", "price", "aov", "cpa", "tax", "shipping", "discount"))
+            lines.append(f"  {k}: ${v:,.2f}" if is_money else f"  {k}: {v:,.2f}")
+        elif isinstance(v, int):
+            lines.append(f"  {k}: {v:,}")
+        else:
+            lines.append(f"  {k}: {v}")
+    return "\n".join(lines)

@@ -367,6 +367,14 @@ def main():
     except Exception as e:
         logger.warning(f"Bot registry sync failed (non-fatal): {e}")
 
+    # Auto-sync tool definitions to Supabase tool_registry
+    try:
+        from tools import sync_tool_registry
+        result = sync_tool_registry()
+        logger.info(f"Tool registry sync: {result}")
+    except Exception as e:
+        logger.warning(f"Tool registry sync failed (non-fatal): {e}")
+
     @app.event("app_mention")
     def handle_mention(event, say, client):
         _handle_message(event, say, client)
