@@ -29,6 +29,7 @@ TOOL_GROUPS = {
     "web_search": "web", "fetch_url": "web", "web_research": "web",
     "create_reminder": "reminders", "list_reminders": "reminders", "cancel_reminder": "reminders",
     "send_slack_dm": "reminders", "schedule_meeting": "reminders",
+    "send_email": "email", "search_email": "email",
     "bot_lookup": "bot_registry", "bot_update": "bot_registry", "bot_list": "bot_registry",
     "bot_roster": "bot_registry", "discover_bots": "bot_registry",
     "analyze_conversation": "conversation", "send_summary_to_stan": "conversation",
@@ -36,6 +37,7 @@ TOOL_GROUPS = {
     "store_shared_memory": "shared_memory", "check_shared_memory": "shared_memory",
     "get_shopify_metrics": "bi", "get_meta_ads_performance": "bi", "get_skio_health": "bi",
     "get_daily_metrics": "bi",
+    "dispatch_to_agent": "hive",
 }
 
 
@@ -285,6 +287,52 @@ TOOL_DEFINITIONS = [
                 },
             },
             "required": ["title", "start_time"],
+        },
+    },
+    # --- Email Tools ---
+    {
+        "name": "send_email",
+        "description": "Send an email from stan@hnyplus.com. Use this when Stan asks to email someone. You can send plain text or HTML emails. If you don't know the recipient's email address, search previous emails first with search_email, or ask Stan.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to": {
+                    "type": "string",
+                    "description": "Recipient email address (e.g. 'liam@hnyplus.com'). For multiple recipients, comma-separate.",
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Email subject line.",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Plain text email body.",
+                },
+                "html_body": {
+                    "type": "string",
+                    "description": "Optional HTML body. If provided, email is sent as multipart with both plain text and HTML versions.",
+                },
+            },
+            "required": ["to", "subject", "body"],
+        },
+    },
+    {
+        "name": "search_email",
+        "description": "Search Stan's email inbox (stan@hnyplus.com). Supports Gmail search syntax: 'from:person@example.com', 'subject:invoice', 'to:liam', 'after:2026/01/01', 'has:attachment', etc. Use this to find email addresses, check on conversations, or look up information from past emails.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Gmail search query (e.g. 'from:liam@hnyplus.com subject:report').",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return. Defaults to 5.",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
         },
     },
     # --- Bot Registry Tools ---
@@ -555,6 +603,35 @@ TOOL_DEFINITIONS = [
             "required": ["source"],
         },
     },
+    # --- Hive Agent Dispatch ---
+    {
+        "name": "dispatch_to_agent",
+        "description": "Dispatch a task to a Workshop Town agent via The Hive. Creates a work item in Supabase that The Hive orchestrator picks up and routes to the right agent. Use this for tasks that benefit from specialized agent processing: financial analysis (ledger), data analysis (scout), system health checks (watchtower), report writing (scribe), or strategic recommendations (advisor). The agent works asynchronously - results are stored in Supabase shared memory when complete.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "type": "string",
+                    "description": "Which agent should handle this task.",
+                    "enum": ["ledger", "scout", "watchtower", "scribe", "advisor"],
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Short title for the work item (e.g., 'Weekly P&L: Feb 17-23')",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Detailed instructions for the agent. Be specific about what data to pull, what analysis to run, and what format the output should be in.",
+                },
+                "priority": {
+                    "type": "string",
+                    "description": "Task priority level.",
+                    "enum": ["low", "medium", "high", "urgent"],
+                },
+            },
+            "required": ["agent", "title", "description"],
+        },
+    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -664,6 +741,20 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
                 inputs.get("attendee_emails", []),
                 slack_context,
             )
+        elif name == "send_email":
+            return _send_email(
+                inputs.get("to", ""),
+                inputs.get("subject", ""),
+                inputs.get("body", ""),
+                inputs.get("html_body"),
+                slack_context,
+            )
+        elif name == "search_email":
+            return _search_email(
+                inputs.get("query", ""),
+                inputs.get("max_results", 5),
+                slack_context,
+            )
         elif name == "bot_lookup":
             from bot_registry import lookup_bot
             return lookup_bot(inputs.get("name", ""))
@@ -729,6 +820,13 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
                 inputs.get("date"),
                 inputs.get("start_date"),
                 inputs.get("end_date"),
+            )
+        elif name == "dispatch_to_agent":
+            return _dispatch_to_agent(
+                inputs.get("agent", ""),
+                inputs.get("title", ""),
+                inputs.get("description", ""),
+                inputs.get("priority", "medium"),
             )
         else:
             return f"Error: Unknown tool '{name}'"
@@ -1140,6 +1238,61 @@ def _schedule_meeting(title, start_time_str, duration_minutes, description, atte
         lines.append(f"Calendar link: {result['html_link']}")
     if result.get("attendees"):
         lines.append(f"Invites sent to: {', '.join(result['attendees'])}")
+
+    return "\n".join(lines)
+
+
+def _send_email(to, subject, body, html_body=None, slack_context=None):
+    """Send an email via Gmail. Admin-only (Stan)."""
+    if not slack_context or slack_context.get("user_id") != "U086HEJAUTH":
+        return "Error: Only Stan can use send_email."
+
+    if not to:
+        return "Error: 'to' (recipient email) is required."
+    if not subject:
+        return "Error: 'subject' is required."
+    if not body:
+        return "Error: 'body' is required."
+
+    try:
+        from gmail import send_email
+        result = send_email(to, subject, body, html_body)
+    except ValueError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error sending email: {e}"
+
+    return f"Email sent to {result['to']}\nSubject: {result['subject']}\nMessage ID: {result['message_id']}"
+
+
+def _search_email(query, max_results=5, slack_context=None):
+    """Search Gmail inbox. Admin-only (Stan)."""
+    if not slack_context or slack_context.get("user_id") != "U086HEJAUTH":
+        return "Error: Only Stan can use search_email."
+
+    if not query:
+        return "Error: 'query' is required (e.g. 'from:liam@hnyplus.com')."
+
+    try:
+        from gmail import search_emails
+        results = search_emails(query, max_results)
+    except ValueError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error searching email: {e}"
+
+    if not results:
+        return f"No emails found for query: {query}"
+
+    lines = [f"Found {len(results)} email(s) for '{query}':\n"]
+    for i, email in enumerate(results, 1):
+        lines.append(f"{i}. {email['subject']}")
+        lines.append(f"   From: {email['from']}")
+        lines.append(f"   To: {email['to']}")
+        lines.append(f"   Date: {email['date']}")
+        if email.get("snippet"):
+            lines.append(f"   Preview: {email['snippet'][:120]}")
+        lines.append("")
 
     return "\n".join(lines)
 
@@ -1961,3 +2114,49 @@ def _get_daily_metrics(source: str, date: str = None, start_date: str = None, en
         else:
             lines.append(f"  {k}: {v}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Hive dispatch
+# ---------------------------------------------------------------------------
+
+def _dispatch_to_agent(agent: str, title: str, description: str, priority: str = "medium") -> str:
+    """Create a work item in Supabase for The Hive to pick up and dispatch to an agent."""
+    valid_agents = {"ledger", "scout", "watchtower", "scribe", "advisor"}
+    if agent not in valid_agents:
+        return f"Error: Unknown agent '{agent}'. Valid agents: {', '.join(sorted(valid_agents))}"
+    if not title:
+        return "Error: 'title' is required."
+    if not description:
+        return "Error: 'description' is required."
+
+    try:
+        from supabase import create_client
+        url = os.environ.get("SUPABASE_URL")
+        key = os.environ.get("SUPABASE_KEY")
+        if not url or not key:
+            return "Error: SUPABASE_URL or SUPABASE_KEY not configured."
+
+        client = create_client(url, key)
+        row = {
+            "title": title,
+            "description": description,
+            "assignee": agent,
+            "priority": priority,
+            "status": "open",
+            "filed_by": "ark",
+        }
+        result = client.table("work_items").insert(row).execute()
+        if result.data:
+            item = result.data[0]
+            return (
+                f"Work item created and queued for {agent}.\n"
+                f"ID: {item['id'][:8]}...\n"
+                f"Title: {title}\n"
+                f"Priority: {priority}\n"
+                f"Status: open (The Hive will dispatch within ~5 seconds)"
+            )
+        return "Error: Work item insert returned no data."
+    except Exception as e:
+        logger.error(f"dispatch_to_agent failed: {e}")
+        return f"Error dispatching to {agent}: {e}"
