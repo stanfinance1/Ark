@@ -740,6 +740,7 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
                 inputs.get("title", ""),
                 inputs.get("description", ""),
                 inputs.get("priority", "medium"),
+                slack_context=slack_context,
             )
         else:
             return f"Error: Unknown tool '{name}'"
@@ -848,6 +849,51 @@ def _upload_file(path: str, title: str, slack_context: dict) -> str:
         return f"Uploaded {os.path.basename(path)} to Slack."
     except Exception as e:
         return f"Error uploading file: {e}"
+
+
+def _upload_agent_charts(attachments: list, agent: str, slack_context: dict):
+    """Decode base64 chart attachments from a completed Hive work item and upload to Slack.
+
+    Called by _dispatch_to_agent when metadata.attachments is present.
+    Non-fatal: upload failures are logged but do not affect the text response.
+    """
+    import tempfile
+    import base64 as _b64
+
+    client = slack_context.get("client")
+    channel = slack_context.get("channel")
+    thread_ts = slack_context.get("thread_ts")
+
+    if not client or not channel:
+        logger.warning("_upload_agent_charts: no Slack client/channel in context")
+        return
+
+    for i, attachment in enumerate(attachments):
+        filename = attachment.get("filename", f"chart_{i}.png")
+        data_b64 = attachment.get("data_b64", "")
+        if not data_b64:
+            continue
+        try:
+            raw_bytes = _b64.b64decode(data_b64)
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                tmp.write(raw_bytes)
+                tmp_path = tmp.name
+
+            chart_title = os.path.splitext(filename)[0].replace("_", " ").title()
+            client.files_upload_v2(
+                channel=channel,
+                file=tmp_path,
+                title=f"[{agent.upper()}] {chart_title}",
+                thread_ts=thread_ts,
+            )
+            logger.info(f"Uploaded chart to Slack: {filename}")
+
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"Failed to upload chart {filename}: {e}")
 
 
 def _web_search(query: str, max_results: int = 5) -> str:
@@ -1557,7 +1603,8 @@ def _check_shared_memory(action: str, query: str = "", limit: int = 10) -> str:
 # Hive dispatch
 # ---------------------------------------------------------------------------
 
-def _dispatch_to_agent(agent: str, title: str, description: str, priority: str = "medium") -> str:
+def _dispatch_to_agent(agent: str, title: str, description: str, priority: str = "medium",
+                       slack_context: dict = None) -> str:
     """Create a work item in Supabase, then poll until the agent finishes (up to 90s)."""
     import time as _time
     from datetime import datetime
@@ -1608,13 +1655,18 @@ def _dispatch_to_agent(agent: str, title: str, description: str, priority: str =
         while _time.monotonic() < deadline:
             _time.sleep(POLL_INTERVAL)
             try:
-                check = sb.table("work_items").select("status,outcome").eq("id", item_id).execute()
+                check = sb.table("work_items").select("status,outcome,metadata").eq("id", item_id).execute()
                 if not check.data:
                     continue
                 row_now = check.data[0]
                 status = row_now.get("status")
                 if status == "done":
                     outcome = row_now.get("outcome") or "(no outcome returned)"
+                    # Upload any chart attachments from metadata
+                    metadata = row_now.get("metadata") or {}
+                    attachments = metadata.get("attachments") or []
+                    if attachments and slack_context:
+                        _upload_agent_charts(attachments, agent, slack_context)
                     return f"[{agent.upper()} completed]\n\n{outcome}"
                 elif status == "failed":
                     outcome = row_now.get("outcome") or "Agent reported failure."
