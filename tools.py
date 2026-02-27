@@ -34,7 +34,6 @@ TOOL_GROUPS = {
     "analyze_conversation": "conversation", "send_summary_to_stan": "conversation",
     "suggest_meeting_with_context": "conversation",
     "store_shared_memory": "shared_memory", "check_shared_memory": "shared_memory",
-    "get_daily_metrics": "bi",
     "dispatch_to_agent": "hive",
 }
 
@@ -530,34 +529,6 @@ TOOL_DEFINITIONS = [
             "required": ["action"],
         },
     },
-    # --- Daily Metrics (Supabase cache) ---
-    {
-        "name": "get_daily_metrics",
-        "description": "Look up historical daily metrics from the Supabase cache. This table stores pre-calculated daily snapshots for Shopify DTC, Shopify Wholesale, and Meta Ads. Use this for historical lookups like 'what were yesterday's numbers', 'show me last week's Meta spend', 'compare sales this month vs last month'. Faster and cheaper than hitting live APIs. Data goes back to 2025-01-01.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "source": {
-                    "type": "string",
-                    "description": "Data source to query.",
-                    "enum": ["shopify_dtc", "shopify_wholesale", "meta_ads"],
-                },
-                "date": {
-                    "type": "string",
-                    "description": "Single date to look up (YYYY-MM-DD, Pacific Time). Use this OR start_date/end_date, not both.",
-                },
-                "start_date": {
-                    "type": "string",
-                    "description": "Start of date range (YYYY-MM-DD, inclusive). Must be used with end_date.",
-                },
-                "end_date": {
-                    "type": "string",
-                    "description": "End of date range (YYYY-MM-DD, inclusive). Must be used with start_date.",
-                },
-            },
-            "required": ["source"],
-        },
-    },
     # --- Hive Agent Dispatch ---
     {
         "name": "dispatch_to_agent",
@@ -762,13 +733,6 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
                 inputs.get("action", "recent_tasks"),
                 inputs.get("query", ""),
                 inputs.get("limit", 10),
-            )
-        elif name == "get_daily_metrics":
-            return _get_daily_metrics(
-                inputs.get("source", ""),
-                inputs.get("date"),
-                inputs.get("start_date"),
-                inputs.get("end_date"),
             )
         elif name == "dispatch_to_agent":
             return _dispatch_to_agent(
@@ -1589,111 +1553,6 @@ def _check_shared_memory(action: str, query: str = "", limit: int = 10) -> str:
 
 
 
-def _get_daily_metrics(source: str, date: str = None, start_date: str = None, end_date: str = None) -> str:
-    """Look up historical daily metrics from the Supabase daily_metrics table."""
-    if not source:
-        return "Error: 'source' is required. Use: shopify_dtc, shopify_wholesale, or meta_ads."
-
-    valid_sources = ("shopify_dtc", "shopify_wholesale", "meta_ads")
-    if source not in valid_sources:
-        return f"Error: Invalid source '{source}'. Use one of: {', '.join(valid_sources)}"
-
-    try:
-        from shared_memory import get_daily_metric, get_date_range_metrics
-    except ImportError:
-        return "Error: shared_memory module not available."
-
-    # Single date lookup
-    if date:
-        data = get_daily_metric(date, source)
-        if not data:
-            return f"No data found for {source} on {date}. Data may not have been backfilled for this date."
-        lines = [f"=== DAILY METRICS: {source.upper()} ({date}) ===", ""]
-        for k, v in data.items():
-            if k.startswith("_"):
-                continue
-            if isinstance(v, float):
-                is_money = any(w in k.lower() for w in ("sales", "spend", "revenue", "cost", "price", "aov", "cpa", "tax", "shipping", "discount"))
-                lines.append(f"  {k}: ${v:,.2f}" if is_money else f"  {k}: {v:,.2f}")
-            elif isinstance(v, int):
-                lines.append(f"  {k}: {v:,}")
-            else:
-                lines.append(f"  {k}: {v}")
-        lines.append(f"\n  (cached at: {data.get('_cached_at', 'unknown')})")
-        return "\n".join(lines)
-
-    # Date range lookup
-    if start_date and end_date:
-        rows = get_date_range_metrics(source, start_date, end_date)
-        if not rows:
-            return f"No data found for {source} from {start_date} to {end_date}."
-        lines = [f"=== DAILY METRICS: {source.upper()} ({start_date} to {end_date}) ==="]
-        lines.append(f"Days with data: {len(rows)}")
-        lines.append("")
-
-        # Detect numeric keys for summary
-        numeric_keys = []
-        for k, v in rows[0].items():
-            if k == "date":
-                continue
-            if isinstance(v, (int, float)):
-                numeric_keys.append(k)
-
-        # Show per-day data (limit to 31 days for readability)
-        if len(rows) <= 31:
-            for row in rows:
-                day = row.get("date", "?")
-                parts = [f"  {day}:"]
-                for k in numeric_keys[:6]:
-                    v = row.get(k, 0)
-                    if isinstance(v, float):
-                        is_money = any(w in k.lower() for w in ("sales", "spend", "revenue", "cost", "price", "aov", "cpa", "tax", "shipping", "discount"))
-                        parts.append(f"{k}=${v:,.2f}" if is_money else f"{k}={v:,.2f}")
-                    else:
-                        parts.append(f"{k}={v:,}")
-                lines.append(" | ".join(parts))
-        else:
-            lines.append(f"  (too many days to show individually -- showing summary only)")
-
-        # Summary totals
-        lines.append("")
-        lines.append("--- TOTALS / AVERAGES ---")
-        for k in numeric_keys:
-            values = [row.get(k, 0) for row in rows]
-            total = sum(values)
-            avg = total / len(values) if values else 0
-            is_money = any(w in k.lower() for w in ("sales", "spend", "revenue", "cost", "price", "tax", "shipping", "discount"))
-            is_avg_metric = any(w in k.lower() for w in ("aov", "cpa", "rate", "ctr", "cpc", "cpm"))
-            if is_avg_metric:
-                lines.append(f"  {k}: avg {avg:,.2f}")
-            elif is_money:
-                lines.append(f"  {k}: total ${total:,.2f} | avg ${avg:,.2f}/day")
-            else:
-                lines.append(f"  {k}: total {total:,.0f} | avg {avg:,.1f}/day")
-
-        return "\n".join(lines)
-
-    # No date provided -- show today (Pacific)
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    today = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
-    data = get_daily_metric(today, source)
-    if not data:
-        return f"No data found for {source} on {today} (today). Try 'yesterday' or specify a date."
-    lines = [f"=== DAILY METRICS: {source.upper()} ({today}) ===", ""]
-    for k, v in data.items():
-        if k.startswith("_"):
-            continue
-        if isinstance(v, float):
-            is_money = any(w in k.lower() for w in ("sales", "spend", "revenue", "cost", "price", "aov", "cpa", "tax", "shipping", "discount"))
-            lines.append(f"  {k}: ${v:,.2f}" if is_money else f"  {k}: {v:,.2f}")
-        elif isinstance(v, int):
-            lines.append(f"  {k}: {v:,}")
-        else:
-            lines.append(f"  {k}: {v}")
-    return "\n".join(lines)
-
-
 # ---------------------------------------------------------------------------
 # Hive dispatch
 # ---------------------------------------------------------------------------
@@ -1701,6 +1560,8 @@ def _get_daily_metrics(source: str, date: str = None, start_date: str = None, en
 def _dispatch_to_agent(agent: str, title: str, description: str, priority: str = "medium") -> str:
     """Create a work item in Supabase, then poll until the agent finishes (up to 90s)."""
     import time as _time
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
     valid_agents = {"ledger", "scout", "watchtower", "scribe", "advisor"}
     if agent not in valid_agents:
@@ -1709,6 +1570,11 @@ def _dispatch_to_agent(agent: str, title: str, description: str, priority: str =
         return "Error: 'title' is required."
     if not description:
         return "Error: 'description' is required."
+
+    # Auto-inject current date/time so agents always know the context
+    now_pt = datetime.now(ZoneInfo("America/Los_Angeles"))
+    date_ctx = f"[Context: Today is {now_pt.strftime('%A, %B %d, %Y')} Pacific Time. Current time: {now_pt.strftime('%I:%M %p PT')}]"
+    description = f"{date_ctx}\n\n{description}"
 
     try:
         from supabase import create_client
