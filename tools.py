@@ -1258,21 +1258,20 @@ def _search_email(query, max_results=5, slack_context=None):
 
 def _analyze_conversation(include_history: bool, slack_context: dict) -> str:
     """Analyze the current conversation thread for insights, action items, and meeting recommendations."""
-    from memory import get_history
-    from slack_users import lookup_user_by_id
+    from memory import ConversationMemory
 
     if not slack_context:
         return "Error: No Slack context available for conversation analysis."
 
     channel = slack_context.get("channel")
     thread_ts = slack_context.get("thread_ts")
-    client = slack_context.get("client")
 
     if not channel:
         return "Error: No channel information available."
 
     # Get conversation history from memory
-    messages = get_history(channel, thread_ts)
+    mem = ConversationMemory()
+    messages = mem.get_history(channel, thread_ts)
 
     if not messages:
         return "No conversation history available to analyze."
@@ -1628,13 +1627,10 @@ def _dispatch_to_agent(agent: str, title: str, description: str, priority: str =
     description = f"{date_ctx}\n\n{description}"
 
     try:
-        from supabase import create_client
-        url = os.environ.get("SUPABASE_URL")
-        key = os.environ.get("SUPABASE_KEY")
-        if not url or not key:
-            return "Error: SUPABASE_URL or SUPABASE_KEY not configured."
-
-        sb = create_client(url, key)
+        from shared_memory import get_client
+        sb = get_client()
+        if not sb:
+            return "Error: Supabase client not available. Check SUPABASE_URL/SUPABASE_KEY."
         row = {
             "title": title,
             "description": description,
