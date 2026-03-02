@@ -229,6 +229,9 @@ def think(user_text: str, channel: str, thread_ts: str, slack_context: dict = No
     # Auto-log substantive conversations to Supabase shared memory
     _maybe_log_conversation(channel, thread_ts, user_name, user_text, assistant_text, iteration, model)
 
+    # Log any questions Ark asks as work_items (show on viz dashboard)
+    _maybe_log_questions(assistant_text, channel, user_name)
+
     return {
         "text": assistant_text,
         "files": generated_files,
@@ -252,4 +255,43 @@ def _maybe_log_conversation(channel, thread_ts, user_name, user_text, assistant_
             model_used=model_label,
         )
     except Exception:
+        pass  # Never break the bot for logging
+
+
+def _extract_questions(text):
+    """Extract sentences that end with ? from Ark's response."""
+    if not text or "?" not in text:
+        return []
+    # Split on sentence boundaries, keep sentences ending with ?
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    questions = [s.strip() for s in sentences if s.strip().endswith("?")]
+    return questions
+
+
+def _maybe_log_questions(assistant_text, channel, user_name):
+    """Log questions Ark asks as pending_human work_items for the viz dashboard."""
+    try:
+        questions = _extract_questions(assistant_text)
+        if not questions:
+            return
+
+        from shared_memory import get_client
+        sb = get_client()
+        if not sb:
+            return
+
+        for q in questions:
+            title = q[:120] if len(q) <= 120 else q[:117] + "..."
+            sb.table("work_items").insert({
+                "title": title,
+                "description": f"Question asked to {user_name} in #{channel}:\n\n{q}",
+                "status": "pending_human",
+                "priority": "medium",
+                "filed_by": "ark",
+                "assignee": "human",
+                "metadata": {"type": "question", "channel": channel, "asked_to": user_name},
+            }).execute()
+            logger.info(f"Logged question as work_item: {title[:60]}")
+    except Exception as e:
+        logger.debug(f"Failed to log question: {e}")
         pass  # Never break the bot for logging
