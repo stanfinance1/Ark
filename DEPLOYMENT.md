@@ -62,7 +62,7 @@ Required:
 ### Before First Deploy
 
 - [ ] Create Railway project
-- [ ] Connect GitHub repo (`stanfinance1/ark-bot`)
+- [ ] Connect GitHub repo (`stanfinance1/Ark`)
 - [ ] Add all environment variables (with .strip() in code)
 - [ ] Enable auto-deploy on push
 - [ ] Verify `railway.toml` uses `launcher.py`
