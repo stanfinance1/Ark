@@ -532,14 +532,14 @@ TOOL_DEFINITIONS = [
     # --- Hive Agent Dispatch ---
     {
         "name": "dispatch_to_agent",
-        "description": "Dispatch a task to the Hive and get the result back. For ALL data and analytics requests, use agent='foreman' -- the Foreman orchestrator decomposes your question and coordinates specialists automatically. Direct specialist routing (ledger, scout, etc.) only for very specific single-agent tasks where you want to bypass orchestration. Foreman calls may take up to 300s for multi-agent convoys. Direct agent calls up to 90s.",
+        "description": "Dispatch a task to the Hive via the Foreman orchestrator. Use agent='foreman' for ALL data, analytics, reports, and business questions -- the Foreman decomposes your question and coordinates the right specialists automatically. Use agent='watchtower' ONLY for explicit system health checks. Foreman calls may take up to 300s for multi-agent convoys.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "agent": {
                     "type": "string",
                     "description": "Which agent should handle this task.",
-                    "enum": ["foreman", "ledger", "scout", "watchtower", "scribe", "advisor"],
+                    "enum": ["foreman", "watchtower"],
                 },
                 "title": {
                     "type": "string",
@@ -1610,9 +1610,13 @@ def _dispatch_to_agent(agent: str, title: str, description: str, priority: str =
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    valid_agents = {"foreman", "ledger", "scout", "watchtower", "scribe", "advisor"}
-    if agent not in valid_agents:
-        return f"Error: Unknown agent '{agent}'. Valid agents: {', '.join(sorted(valid_agents))}"
+    ALLOWED_AGENTS = {"foreman", "watchtower"}
+    if agent not in ALLOWED_AGENTS:
+        return (
+            f"Error: Direct routing to '{agent}' is not allowed. "
+            f"Use agent='foreman' for all data and analytics requests. "
+            f"The Foreman will dispatch to the right specialist automatically."
+        )
     if not title:
         return "Error: 'title' is required."
     if not description:
