@@ -314,6 +314,88 @@ def get_date_range_metrics(source: str, start_date: str, end_date: str) -> list:
         return []
 
 
+# --- financial_statements table ---
+
+def get_financial_statement(period_month: str, statement_type: str) -> dict | None:
+    """Get a single monthly financial statement.
+    Args:
+        period_month: 'YYYY-MM' (e.g. '2026-01')
+        statement_type: 'pnl_actuals' | 'pnl_budget' | 'cash_flow'
+    Returns: dict with all financial line items, or None if not found.
+    """
+    client = get_client()
+    if not client:
+        return None
+    try:
+        result = (client.table("financial_statements")
+                  .select("data,period_month,statement_type,updated_at")
+                  .eq("period_month", period_month)
+                  .eq("statement_type", statement_type)
+                  .execute())
+        if not result.data:
+            return None
+        row = result.data[0]
+        data = row["data"] if isinstance(row["data"], dict) else json.loads(row["data"])
+        data["_period_month"] = row["period_month"]
+        data["_statement_type"] = row["statement_type"]
+        data["_cached_at"] = row["updated_at"]
+        return data
+    except Exception as e:
+        logger.error(f"get_financial_statement failed: {e}")
+        return None
+
+
+def set_financial_statement(period_month: str, statement_type: str, data: dict) -> bool:
+    """Upsert a monthly financial statement."""
+    client = get_client()
+    if not client:
+        return False
+    try:
+        client.table("financial_statements").upsert({
+            "period_month": period_month,
+            "statement_type": statement_type,
+            "data": json.dumps(data) if isinstance(data, dict) else data,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }, on_conflict="period_month,statement_type").execute()
+        return True
+    except Exception as e:
+        logger.error(f"set_financial_statement failed: {e}")
+        return False
+
+
+def get_financial_statement_range(statement_type: str,
+                                  start_month: str, end_month: str) -> list:
+    """Get financial statements for a month range, sorted by period_month.
+    Args:
+        statement_type: 'pnl_actuals' | 'pnl_budget' | 'cash_flow'
+        start_month: 'YYYY-MM' (inclusive)
+        end_month: 'YYYY-MM' (inclusive)
+    Returns: list of dicts, each with 'period_month' + all financial fields.
+    """
+    client = get_client()
+    if not client:
+        return []
+    try:
+        result = (client.table("financial_statements")
+                  .select("period_month,data,updated_at")
+                  .eq("statement_type", statement_type)
+                  .gte("period_month", start_month)
+                  .lte("period_month", end_month)
+                  .order("period_month")
+                  .execute())
+        rows = result.data or []
+        out = []
+        for row in rows:
+            d = row["data"] if isinstance(row["data"], dict) else json.loads(row["data"])
+            entry = {"period_month": row["period_month"]}
+            entry.update(d)
+            out.append(entry)
+        return out
+    except Exception as e:
+        logger.error(f"get_financial_statement_range failed: {e}")
+        return []
+
+
 # --- Context loader (for Ark brain auto-inject) ---
 
 def load_shared_context(max_convos: int = 5, max_tasks: int = 5) -> str:
