@@ -51,12 +51,42 @@ BOT_COOLDOWN_SECONDS = 300    # Reset counter after 5 minutes of silence
 
 
 # ---------------------------------------------------------------------------
+# Per-user rate limiting (protect against API cost abuse)
+# ---------------------------------------------------------------------------
+# Key: user_id -> list of timestamps (sliding window)
+_user_rate_tracker: dict[str, list[float]] = {}
+USER_RATE_LIMIT = 10           # Max messages per window
+USER_RATE_WINDOW = 300         # 5-minute sliding window
+
+
+def _check_user_rate_limit(user_id: str) -> bool:
+    """Return True if the user is within rate limits, False if they should be throttled."""
+    now = time.time()
+    if user_id not in _user_rate_tracker:
+        _user_rate_tracker[user_id] = []
+    # Prune timestamps outside the window
+    _user_rate_tracker[user_id] = [
+        ts for ts in _user_rate_tracker[user_id] if now - ts < USER_RATE_WINDOW
+    ]
+    if len(_user_rate_tracker[user_id]) >= USER_RATE_LIMIT:
+        return False
+    _user_rate_tracker[user_id].append(now)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _clean_mention(text: str) -> str:
     """Remove @Ark mention from message text."""
     return re.sub(r"<@[A-Z0-9]+>", "", text).strip()
+
+
+# Allowed file extensions for uploads
+_ALLOWED_EXTENSIONS = {".txt", ".csv", ".json", ".xlsx", ".xls", ".pdf", ".png",
+                       ".jpg", ".jpeg", ".gif", ".md", ".py", ".html", ".css", ".js"}
+_MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
 def _download_slack_files(files: list) -> list:
@@ -73,6 +103,18 @@ def _download_slack_files(files: list) -> list:
         url = f.get("url_private_download")
         name = f.get("name", "unknown_file")
         if not url:
+            continue
+
+        # Validate file extension
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in _ALLOWED_EXTENSIONS:
+            logger.warning(f"Rejected upload: {name} (extension {ext} not allowed)")
+            continue
+
+        # Validate file size (Slack provides this in metadata)
+        file_size = f.get("size", 0)
+        if file_size > _MAX_FILE_SIZE:
+            logger.warning(f"Rejected upload: {name} ({file_size} bytes exceeds limit)")
             continue
 
         # Prefix with timestamp to avoid collisions
@@ -193,6 +235,15 @@ def _handle_message(event, say, client):
     # Skip message subtypes (edits, deletes, etc.)
     if event.get("subtype"):
         return
+
+    # Per-user rate limiting (skip for bots — they have the loop guard)
+    sender = event.get("user", "")
+    if sender and not event.get("bot_id"):
+        if not _check_user_rate_limit(sender):
+            thread_ts = event.get("thread_ts", event.get("ts", ""))
+            say(text="You're sending messages too quickly. Please wait a moment and try again.",
+                thread_ts=thread_ts)
+            return
 
     # Skip if no text AND no files
     if not text and not event.get("files"):
@@ -325,7 +376,7 @@ def _handle_message(event, say, client):
     except Exception as e:
         logger.error(f"Error processing message: {e}", exc_info=True)
         say(
-            text=f"Sorry, I hit an error: {str(e)[:200]}",
+            text="Sorry, I hit an error processing your message. Please try again.",
             thread_ts=thread_ts,
         )
 

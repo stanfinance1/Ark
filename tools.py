@@ -18,6 +18,28 @@ from config import BASE_DIR, TMP_DIR
 
 logger = logging.getLogger(__name__)
 PYTHON = sys.executable
+
+# ---------------------------------------------------------------------------
+# Security: centralized admin user ID
+# ---------------------------------------------------------------------------
+ADMIN_USER_ID = "U086HEJAUTH"
+
+
+def _is_admin(slack_context: dict | None) -> bool:
+    """Check if the requesting user is the admin."""
+    return bool(slack_context and slack_context.get("user_id") == ADMIN_USER_ID)
+
+
+def _validate_path(path: str) -> str | None:
+    """Validate a file path is within BASE_DIR. Returns resolved path or None."""
+    resolved = os.path.realpath(os.path.join(BASE_DIR, path) if not os.path.isabs(path) else path)
+    base_resolved = os.path.realpath(BASE_DIR)
+    if not resolved.startswith(base_resolved + os.sep) and resolved != base_resolved:
+        return None
+    # Block access to .env files anywhere in the tree
+    if os.path.basename(resolved) == ".env":
+        return None
+    return resolved
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 # ---------------------------------------------------------------------------
@@ -628,11 +650,11 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
     _success = True
     try:
         if name == "run_python":
-            return _run_python(inputs.get("code", ""), inputs.get("description", ""))
+            return _run_python(inputs.get("code", ""), inputs.get("description", ""), slack_context)
         elif name == "read_file":
-            return _read_file(inputs.get("path", ""), inputs.get("max_lines", 200))
+            return _read_file(inputs.get("path", ""), inputs.get("max_lines", 200), slack_context)
         elif name == "list_files":
-            return _list_files(inputs.get("path", ""))
+            return _list_files(inputs.get("path", ""), slack_context)
         elif name == "upload_file":
             return _upload_file(inputs.get("path", ""), inputs.get("title", ""), slack_context)
         elif name == "web_search":
@@ -752,11 +774,17 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
         try:
             _elapsed = int((_time.monotonic() - _t0) * 1000)
             _user = None
+            _uid = None
             if slack_context:
                 _user = slack_context.get("user_name") or slack_context.get("user_id")
+                _uid = slack_context.get("user_id")
             from shared_memory import log_tool_usage
             log_tool_usage(name, system="ark", invoked_by=_user,
                            success=_success, duration_ms=_elapsed)
+            # Log data-access tools for audit trail
+            if name in ("dispatch_to_agent", "check_shared_memory",
+                        "store_shared_memory", "run_python", "read_file"):
+                logger.info(f"AUDIT: tool={name} user_id={_uid} success={_success} ms={_elapsed}")
         except Exception:
             pass  # never let logging break tool execution
 
@@ -765,8 +793,10 @@ def execute_tool(name: str, inputs: dict, slack_context: dict = None) -> str:
 # Tool implementations
 # ---------------------------------------------------------------------------
 
-def _run_python(code: str, description: str = "") -> str:
-    """Execute Python code in a subprocess and return stdout + stderr."""
+def _run_python(code: str, description: str = "", slack_context: dict = None) -> str:
+    """Execute Python code in a subprocess and return stdout + stderr. Admin-only."""
+    if not _is_admin(slack_context):
+        return "Error: Only Stan (admin) can use run_python."
     full_code = f"import sys, os\nTMP_DIR = r\"{TMP_DIR}\"\nBASE_DIR = r\"{BASE_DIR}\"\nos.makedirs(TMP_DIR, exist_ok=True)\n\n{code}"
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", dir=TMP_DIR, delete=False) as f:
@@ -790,14 +820,15 @@ def _run_python(code: str, description: str = "") -> str:
         os.unlink(script_path)
 
 
-def _read_file(path: str, max_lines: int = 200) -> str:
-    """Read a text file and return its contents."""
-    if not os.path.isabs(path):
-        path = os.path.join(BASE_DIR, path)
-    if not os.path.exists(path):
-        return f"Error: File not found: {path}"
+def _read_file(path: str, max_lines: int = 200, slack_context: dict = None) -> str:
+    """Read a text file and return its contents. Path restricted to BASE_DIR."""
+    validated = _validate_path(path)
+    if validated is None:
+        return f"Error: Access denied. Path must be within the project directory and cannot be a .env file."
+    if not os.path.exists(validated):
+        return f"Error: File not found: {validated}"
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
+        with open(validated, "r", encoding="utf-8", errors="replace") as f:
             lines = []
             for i, line in enumerate(f):
                 if i >= max_lines:
@@ -809,23 +840,24 @@ def _read_file(path: str, max_lines: int = 200) -> str:
         return f"Error reading file: {e}"
 
 
-def _list_files(path: str = "") -> str:
-    """List files in a directory."""
+def _list_files(path: str = "", slack_context: dict = None) -> str:
+    """List files in a directory. Path restricted to BASE_DIR."""
     if not path:
         path = BASE_DIR
-    if not os.path.isabs(path):
-        path = os.path.join(BASE_DIR, path)
-    if not os.path.isdir(path):
-        return f"Error: Not a directory: {path}"
+    validated = _validate_path(path)
+    if validated is None:
+        return f"Error: Access denied. Path must be within the project directory."
+    if not os.path.isdir(validated):
+        return f"Error: Not a directory: {validated}"
     try:
         entries = []
-        for entry in sorted(os.listdir(path)):
-            full = os.path.join(path, entry)
+        for entry in sorted(os.listdir(validated)):
+            full = os.path.join(validated, entry)
             if os.path.isdir(full):
                 entries.append(f"  {entry}/")
             else:
                 entries.append(f"  {entry} ({_human_size(os.path.getsize(full))})")
-        return f"Contents of {path}:\n" + "\n".join(entries)
+        return f"Contents of {validated}:\n" + "\n".join(entries)
     except Exception as e:
         return f"Error listing directory: {e}"
 
@@ -1113,7 +1145,7 @@ def _send_slack_dm(recipient_name, message, slack_context):
         return "Error: No Slack context available."
 
     # Admin-only: only Stan can send DMs through Ark
-    if slack_context.get("user_id") != "U086HEJAUTH":
+    if not _is_admin(slack_context):
         return "Error: Only Stan can use send_slack_dm."
 
     client = slack_context.get("client")
@@ -1153,7 +1185,7 @@ def _schedule_meeting(title, start_time_str, duration_minutes, description, atte
     from google_calendar import create_event, USER_TIMEZONE
 
     # Admin-only: only Stan can schedule meetings through Ark
-    if not slack_context or slack_context.get("user_id") != "U086HEJAUTH":
+    if not _is_admin(slack_context):
         return "Error: Only Stan can use schedule_meeting."
 
     if not title:
@@ -1203,7 +1235,7 @@ def _schedule_meeting(title, start_time_str, duration_minutes, description, atte
 
 def _send_email(to, subject, body, html_body=None, slack_context=None):
     """Send an email via Gmail. Admin-only (Stan)."""
-    if not slack_context or slack_context.get("user_id") != "U086HEJAUTH":
+    if not _is_admin(slack_context):
         return "Error: Only Stan can use send_email."
 
     if not to:
@@ -1226,7 +1258,7 @@ def _send_email(to, subject, body, html_body=None, slack_context=None):
 
 def _search_email(query, max_results=5, slack_context=None):
     """Search Gmail inbox. Admin-only (Stan)."""
-    if not slack_context or slack_context.get("user_id") != "U086HEJAUTH":
+    if not _is_admin(slack_context):
         return "Error: Only Stan can use search_email."
 
     if not query:
@@ -1364,7 +1396,7 @@ def _analyze_conversation(include_history: bool, slack_context: dict) -> str:
 
 def _send_summary_to_stan(summary: str, key_points: list, action_items: list, recommendations: str, urgency: str, slack_context: dict) -> str:
     """Send a conversation summary to Stan via DM."""
-    STAN_USER_ID = "U086HEJAUTH"
+    STAN_USER_ID = ADMIN_USER_ID
 
     if not summary:
         return "Error: Summary is required."
@@ -1483,7 +1515,7 @@ def _suggest_meeting_with_context(reason: str, proposed_attendees: list, propose
 
     if schedule_immediately:
         # Check if user is Stan (only Stan can schedule)
-        if slack_context.get("user_id") == "U086HEJAUTH":
+        if _is_admin(slack_context):
             lines.append("\n**Ready to Schedule:** Yes - I can schedule this meeting now if you provide:")
             lines.append("1. Preferred date/time (e.g., 'tomorrow at 2pm')")
             lines.append("2. Email addresses for attendees (I'll look them up via Slack if you provide names)")
