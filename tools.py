@@ -532,14 +532,14 @@ TOOL_DEFINITIONS = [
     # --- Hive Agent Dispatch ---
     {
         "name": "dispatch_to_agent",
-        "description": "Dispatch a task to a Hive agent and get the result back. This is your PRIMARY tool for all data and analytics requests. Routes to the right specialist: ledger (revenue, orders, AOV, Shopify data), scout (Meta Ads, CPA, trends, comparisons, SKIO/subscription data), watchtower (system health), scribe (reports/summaries), advisor (strategy/recommendations). Waits up to 90s for the agent to finish and returns the full result.",
+        "description": "Dispatch a task to the Hive and get the result back. For ALL data and analytics requests, use agent='foreman' -- the Foreman orchestrator decomposes your question and coordinates specialists automatically. Direct specialist routing (ledger, scout, etc.) only for very specific single-agent tasks where you want to bypass orchestration. Foreman calls may take up to 300s for multi-agent convoys. Direct agent calls up to 90s.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "agent": {
                     "type": "string",
                     "description": "Which agent should handle this task.",
-                    "enum": ["ledger", "scout", "watchtower", "scribe", "advisor"],
+                    "enum": ["foreman", "ledger", "scout", "watchtower", "scribe", "advisor"],
                 },
                 "title": {
                     "type": "string",
@@ -1610,7 +1610,7 @@ def _dispatch_to_agent(agent: str, title: str, description: str, priority: str =
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    valid_agents = {"ledger", "scout", "watchtower", "scribe", "advisor"}
+    valid_agents = {"foreman", "ledger", "scout", "watchtower", "scribe", "advisor"}
     if agent not in valid_agents:
         return f"Error: Unknown agent '{agent}'. Valid agents: {', '.join(sorted(valid_agents))}"
     if not title:
@@ -1649,7 +1649,7 @@ def _dispatch_to_agent(agent: str, title: str, description: str, priority: str =
 
         # Poll until done/failed or timeout
         POLL_INTERVAL = 3
-        TIMEOUT = 90
+        TIMEOUT = 300 if agent == "foreman" else 90
         deadline = _time.monotonic() + TIMEOUT
 
         while _time.monotonic() < deadline:
